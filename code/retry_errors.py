@@ -35,7 +35,7 @@ def call_chat(qid: str, question: str) -> str:
 
 
 def main() -> None:
-    sub_path = Path("submissions/submission_v13.csv")
+    sub_path = Path("submissions/submission_v15.csv")
     q_path = Path("data/question_public.csv")
 
     # load questions

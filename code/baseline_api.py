@@ -2,27 +2,24 @@
 """Multimodal customer service agent for DataFountain 1165.
 
 Pipeline:
-  1) If images present → VLM analysis (Qwen3-VL-8B-Instruct)
-  2) BM25 retrieval from local knowledge base
-  3) LLM answer generation (Qwen3.5-122B-A10B) with evidence + image facts
-  4) E-commerce policy questions → template answers (fast, no LLM needed)
+  1) If images present → VLM analysis
+  2) Vector retrieval (Qwen3-VL-Embedding-8B) from knowledge base
+  3) LLM answer generation with evidence + image facts
 """
 
 from __future__ import annotations
 
-from collections import Counter, deque
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass
 import base64
 import binascii
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from concurrent.futures import ThreadPoolExecutor
 import urllib.error
 import urllib.request
 
@@ -34,9 +31,14 @@ from pydantic import BaseModel, Field, model_validator
 
 ROOT = Path(__file__).resolve().parents[1]
 KNOWLEDGE_PATH = ROOT / "data" / "knowledge.jsonl"
+EMBEDDINGS_PATH = ROOT / "data" / "embeddings.jsonl"
 
-CHAT_MODEL = os.getenv("CHAT_MODEL", "Qwen/Qwen3.5-397B-A17B")
-VLM_MODEL = os.getenv("VLM_MODEL", "Qwen/Qwen3.5-397B-A17B")
+CHAT_MODEL = os.getenv("CHAT_MODEL", "Qwen/Qwen3.6-35B-A3B")
+VLM_MODEL = os.getenv("VLM_MODEL", "Qwen/Qwen3.6-35B-A3B")
+EMBED_MODEL = "Qwen/Qwen3-VL-Embedding-8B"
+RERANK_MODEL = os.getenv("RERANK_MODEL", "Qwen/Qwen3-VL-Reranker-8B")
+USE_RERANKER = os.getenv("USE_RERANKER", "1") == "1"
+RERANK_TOP_N = 50  # candidates to rerank before selecting TOP_K
 API_BASE = os.getenv("OPENAI_BASE_URL", "https://api.siliconflow.cn/v1")
 API_KEY = os.getenv("OPENAI_API_KEY", os.getenv("SILICONFLOW_API_KEY", ""))
 KAFU_API_TOKEN = os.getenv("KAFU_API_TOKEN", "")
@@ -44,13 +46,7 @@ KAFU_API_TOKEN = os.getenv("KAFU_API_TOKEN", "")
 MAX_IMAGES = 3
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 SESSION_MAX_TURNS = 6
-TOP_K = 8
-
-WORD_RE = re.compile(r"[一-鿿]+|[A-Za-z0-9_]+")
-EN_STOPWORDS = {"a","an","and","are","as","at","be","by","do","for","from",
-                "how","i","if","in","is","it","me","my","of","on","or",
-                "should","that","the","this","to","use","what","when","where",
-                "while","with","you","your"}
+TOP_K = 6
 
 
 # ─── Models ───────────────────────────────────────────────────────────────────
@@ -96,18 +92,6 @@ class ChatResponse(BaseModel):
 
 # ─── Utilities ────────────────────────────────────────────────────────────────
 
-def _tokenize(text: str) -> list[str]:
-    tokens: list[str] = []
-    for chunk in WORD_RE.findall(text.lower()):
-        if re.search(r"[一-鿿]", chunk):
-            tokens.append(chunk)
-            if len(chunk) > 2:
-                tokens.extend(chunk[i:i+2] for i in range(len(chunk)-1))
-        elif len(chunk) >= 2 and chunk not in EN_STOPWORDS:
-            tokens.append(chunk)
-    return tokens
-
-
 def _extract_b64(image: str) -> str:
     s = image.strip()
     return s.split(",", 1)[1].strip() if s.startswith("data:") and "," in s else s
@@ -151,7 +135,7 @@ def _call_api(model: str, messages: list[dict], max_tokens: int = 600,
     raise RuntimeError("API rate limit exceeded after retries")
 
 
-# ─── Knowledge Base & BM25 ────────────────────────────────────────────────────
+# ─── Knowledge Base & Vector Retrieval ───────────────────────────────────────
 
 def _load_knowledge(path: Path) -> list[Doc]:
     if not path.exists():
@@ -172,93 +156,97 @@ def _load_knowledge(path: Path) -> list[Doc]:
     return docs
 
 
-class BM25Index:
-    def __init__(self, docs: list[Doc], k1: float = 1.5, b: float = 0.75) -> None:
-        self.docs = docs
-        self.k1, self.b = k1, b
-        self.doc_tf: list[Counter] = []
-        self.doc_sets: list[set] = []
-        self.title_sets: list[set] = []
-        self.lengths: list[int] = []
-        df: Counter = Counter()
-        for doc in docs:
-            tokens = _tokenize(f"{doc.title} {doc.content}")
-            tf = Counter(tokens)
-            self.doc_tf.append(tf)
-            self.doc_sets.append(set(tf))
-            self.title_sets.append(set(_tokenize(doc.title)))
-            self.lengths.append(max(1, len(tokens)))
-            df.update(set(tf))
-        n = max(1, len(docs))
-        self.avg_len = sum(self.lengths) / n
-        self.idf = {t: math.log(1 + (n - f + 0.5) / (f + 0.5)) for t, f in df.items()}
-
-    def search(self, query: str, top_k: int = 5) -> list[tuple[Doc, float]]:
-        q_tokens = list(dict.fromkeys(_tokenize(query)))
-        if not q_tokens:
-            return []
-        q_set = set(q_tokens)
-        scores: list[tuple[float, int]] = []
-        for i, tf in enumerate(self.doc_tf):
-            dl = self.lengths[i]
-            score = 0.0
-            for t in q_tokens:
-                f = tf.get(t, 0)
-                if f <= 0:
-                    continue
-                idf = self.idf.get(t, 0.0)
-                denom = f + self.k1 * (1 - self.b + self.b * dl / self.avg_len)
-                score += idf * f * (self.k1 + 1) / max(denom, 1e-9)
-            if score > 0:
-                title_hit = len(q_set & self.title_sets[i])
-                score += 0.5 * title_hit
-                scores.append((score, i))
-        scores.sort(reverse=True)
-        return [(self.docs[i], s) for s, i in scores[:top_k]]
-
-
 KNOWLEDGE = _load_knowledge(KNOWLEDGE_PATH)
-INDEX = BM25Index(KNOWLEDGE)
+_DOC_ID_MAP: dict[str, Doc] = {d.doc_id: d for d in KNOWLEDGE}
+
+_EMBED_VECS: dict[str, list[float]] = {}
+_EMBED_LOADED = False
+
+
+def _load_embeddings() -> None:
+    global _EMBED_LOADED
+    if _EMBED_LOADED:
+        return
+    _EMBED_LOADED = True
+    if not EMBEDDINGS_PATH.exists():
+        return
+    with EMBEDDINGS_PATH.open(encoding="utf-8") as f:
+        for line in f:
+            obj = json.loads(line)
+            _EMBED_VECS[obj["doc_id"]] = obj["embedding"]
+
+
+def _embed_query(text: str) -> list[float] | None:
+    if not API_KEY:
+        return None
+    payload = {"model": EMBED_MODEL, "input": [text], "encoding_format": "float"}
+    req = urllib.request.Request(
+        f"{API_BASE.rstrip('/')}/embeddings",
+        data=json.dumps(payload, ensure_ascii=False).encode(),
+        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read())["data"][0]["embedding"]
+    except Exception:
+        return None
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(x * x for x in b) ** 0.5
+    return dot / (na * nb + 1e-9)
+
+
+def _rerank(query: str, docs: list[Doc]) -> list[Doc]:
+    if not docs or not API_KEY:
+        return docs
+    payload = {
+        "model": RERANK_MODEL,
+        "query": query,
+        "documents": [d.content for d in docs],
+        "top_n": len(docs),
+    }
+    req = urllib.request.Request(
+        f"{API_BASE.rstrip('/')}/rerank",
+        data=json.dumps(payload, ensure_ascii=False).encode(),
+        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read())
+        ranked = sorted(data["results"], key=lambda x: x["relevance_score"], reverse=True)
+        return [docs[item["index"]] for item in ranked]
+    except Exception:
+        return docs
 
 
 def _retrieve(query: str, top_k: int = TOP_K) -> list[Doc]:
-    return [doc for doc, _ in INDEX.search(query, top_k)]
-
-
-def _pick_sentences(query: str, docs: list[Doc], limit: int = 5) -> list[str]:
-    q_set = set(_tokenize(query))
-    candidates: list[tuple[float, str]] = []
-    for doc in docs:
-        for sent in re.split(r"[。！？；\n]+", doc.content):
-            sent = sent.strip()
-            if len(sent) < 10:
-                continue
-            overlap = len(q_set & set(_tokenize(sent)))
-            if overlap > 0:
-                candidates.append((overlap, sent))
-    candidates.sort(reverse=True)
-    seen: set[str] = set()
-    result = []
-    for _, s in candidates:
-        if s not in seen:
-            seen.add(s)
-            result.append(s)
-            if len(result) >= limit:
-                break
-    return result
+    _load_embeddings()
+    if not _EMBED_VECS:
+        return []
+    q_vec = _embed_query(query)
+    if q_vec is None:
+        return []
+    scored = sorted(
+        ((doc_id, _cosine(q_vec, vec)) for doc_id, vec in _EMBED_VECS.items()),
+        key=lambda x: x[1], reverse=True,
+    )
+    candidates = [_DOC_ID_MAP[doc_id] for doc_id, _ in scored[:RERANK_TOP_N] if doc_id in _DOC_ID_MAP]
+    if USE_RERANKER:
+        candidates = _rerank(query, candidates)
+    return candidates[:top_k]
 
 
 def _collect_image_ids(docs: list[Doc], max_ids: int = 3) -> list[str]:
-    ids: list[str] = []
-    seen: set[str] = set()
+    # Only take images from the top-ranked doc to avoid mixing unrelated images
     for doc in docs:
-        for ref in doc.image_refs:
-            if ref not in seen:
-                seen.add(ref)
-                ids.append(ref)
-                if len(ids) >= max_ids:
-                    return ids
-    return ids
+        if doc.image_refs:
+            return list(dict.fromkeys(doc.image_refs))[:max_ids]
+    return []
 
 
 # ─── Session Memory ───────────────────────────────────────────────────────────
@@ -316,62 +304,36 @@ def _analyze_images(images: list[str]) -> list[str]:
         return [f.result() for f in futures if f.result()]
 
 
-# ─── E-commerce Policy Templates ─────────────────────────────────────────────
-
-_POLICY_RULES: list[tuple[list[str], str, str]] = [
-    (["投诉", "辱骂", "虚假宣传", "假货", "少了一件", "包装破损", "拆封", "二手", "过期", "保质期", "太差了", "不满意", "差评"],
-     "complaint",
-     "您好，非常抱歉给您带来不好的体验！该问题可优先为您登记升级处理，支持核实后补发、换货、维修或退款。请您提供订单号及问题照片/视频证据，我会立即为您创建加急工单并持续跟进结果。"),
-    (["7天无理由", "七天无理由", "退货", "换货"],
-     "returns",
-     "您好，支持7天无理由退换货。商品需保持完好、配件齐全且不影响二次销售；非质量问题通常由买家承担退回运费，质量问题由我们承担。您可提供订单号，我帮您核对可退换条件。"),
-    (["退款"],
-     "refund",
-     "您好，退款一般会在审核通过后原路退回，到账时间通常为1-7个工作日，信用卡渠道可能略慢。若超时未到账，您把订单号发我，我马上帮您催办。"),
-    (["发票", "抬头", "开票"],
-     "invoice",
-     "您好，支持开具发票，可开个人或企业抬头。订单完成后一般1-3个工作日内开具；若抬头填写有误，可在开票前联系修改。您把订单号和开票信息发我，我帮您立即处理。"),
-    (["待揽收", "揽收"],
-     "pickup",
-     "您好，物流显示待揽收，大概率是商品已打包完成，等待快递员上门取件哦，一般24小时内会完成揽收；若超过24小时仍未揽收，您可以联系我们客服，我们会催促快递方尽快上门。"),
-    (["乡镇"],
-     "rural",
-     "您好，我们的商品支持送到大部分乡镇哦，具体能否送达取决于您的收货地址，您可以告诉我详细的收货地址，我帮您查询。送到乡镇一般不需要额外加运费，和市区运费一致；物流时效会比市区稍慢，正常情况下下单后48小时发货，乡镇地区3-5天可收到，偏远乡镇可能需要5-7天哦。"),
-    (["寄到国外", "国际配送", "海外"],
-     "international",
-     "您好，部分商品支持国际配送，具体国家、运费与时效需按收货地和商品属性核算。请提供国家/地区与商品链接，我帮您确认是否可寄及预计费用。"),
-    (["物流", "发货", "多久能到", "运费"],
-     "shipping",
-     "您好，当前物流与发货时效可帮您实时核查。若您方便提供订单号，我可以立即查询发货节点、预计送达时间，并为您跟进异常状态。"),
-    (["维修", "人为损坏", "保修", "质保", "故障"],
-     "warranty",
-     "您好，售后支持检测、维修与换新评估。人为损坏通常可维修但会产生维修费用，非人为质量问题在保修范围内可按政策免费处理。请提供订单号、故障现象和照片，我帮您判断最优处理方案。"),
-]
-
-
-def _match_policy(query: str) -> str | None:
-    q = re.sub(r"\s+", "", query.lower())
-    for keywords, _, template in _POLICY_RULES:
-        if any(k in q for k in keywords):
-            return template
-    return None
-
-
 # ─── LLM Answer Generation ────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """你是一个专业的多模态电商客服智能体。
 
 回答规则：
-1. 优先使用提供的知识库证据和图片分析结果作答
-2. 回答风格参考示例：自然、简洁、礼貌，直接给出结论和操作步骤
-3. 如果问题涉及图片，结合图片分析结果回答
-4. 如果知识库有相关图示，在合适位置使用 <PIC> 占位
-5. 不要编造不在证据中的信息
-6. 不要输出"根据证据"、"知识库显示"等内部说明
+1. 优先使用知识库证据回答产品相关问题
+2. 电商政策问题（退货/退款/发票/物流/乡镇配送/国际配送/投诉等）直接用内置政策知识回答，无需知识库
+3. 知识库有图示时，在对应文字后紧跟 <PIC> 占位符
+4. 不输出"根据证据"、"知识库显示"等内部说明
+5. 产品状态/参数类问题：直接列举，每项后跟 <PIC>（如有图示）
+6. 不编造不在证据或政策中的信息
 
-回答示例风格：
-- 产品问题："DCB107、DCB112 电池组充电中<PIC>电池组已充满<PIC>过热/过冷延迟<PIC>"
-- 操作问题："表带尺寸如下所示。注意：单独销售的配件表带可能略有差异。\n<PIC>"
+内置电商政策知识（政策类问题直接用以下措辞回答，不要改写）：
+- 乡镇配送：您好，我们的商品支持送到大部分乡镇哦，具体能否送达，取决于您的收货地址，您可以告诉我详细的收货地址，我帮您查询。送到乡镇一般不需要额外加运费，和市区运费一致；物流时效会比市区稍慢，正常情况下，下单后48小时发货，乡镇地区3-5天可收到，偏远乡镇可能需要5-7天哦。
+- 待揽收：您好，物流显示待揽收，大概率是商品已打包完成，等待快递员上门取件哦，一般24小时内会完成揽收；若超过24小时仍未揽收，您可以联系我们客服，我们会催促快递方尽快上门。
+- 7天无理由退换货：您好，支持7天无理由退换货。商品需保持完好、配件齐全且不影响二次销售；非质量问题通常由买家承担退回运费，质量问题由我们承担。您可提供订单号，我帮您核对可退换条件。
+- 退款：您好，退款一般会在审核通过后原路退回，到账时间通常为1-7个工作日，信用卡渠道可能略慢。若超时未到账，您把订单号发我，我马上帮您催办。
+- 发票：您好，支持开具发票，可开个人或企业抬头。订单完成后一般1-3个工作日内开具；若抬头填写有误，可在开票前联系修改。
+- 投诉/质量问题：您好，非常抱歉给您带来不好的体验！该问题可优先为您登记升级处理，支持核实后补发、换货、维修或退款。请您提供订单号及问题照片/视频证据，我会立即为您创建加急工单并持续跟进结果。
+- 维修失误（维修后短期内同样故障）：您好，非常抱歉给您带来困扰！维修后短期内出现同样故障，且是上次维修不彻底导致的，属于我们的维修失误，支持免费重新维修，并延长维修质保期。请您提供维修单号、商品故障描述，我们立即安排专业维修人员处理。
+
+严格模仿以下示例风格：
+Q: DCB107/DCB112指示灯含义？
+A: DCB107、DCB112 电池组充电中<PIC>电池组已充满<PIC>过热/过冷延迟<PIC>
+
+Q: 表带有其他尺寸吗？
+A: 表带尺寸如下所示。注意：单独销售的配件表带可能略有差异。\n<PIC>
+
+Q: 商品能送到乡镇吗？
+A: 您好，我们的商品支持送到大部分乡镇哦，具体能否送达取决于您的收货地址，您可以告诉我详细的收货地址，我帮您查询。送到乡镇一般不需要额外加运费，和市区运费一致；物流时效会比市区稍慢，正常情况下下单后48小时发货，乡镇地区3-5天可收到，偏远乡镇可能需要5-7天哦。
 """
 
 
@@ -408,33 +370,25 @@ def _handle(req: ChatRequest) -> str:
     session_id = (req.session_id or f"sess_{int(time.time()*1000)}").strip()
     memory = _get_memory(session_id)
 
-    # 1. Policy template (fast path, no LLM)
-    policy = _match_policy(query)
-    if policy:
-        _save_memory(session_id, query, policy)
-        return policy
-
-    # 2. VLM image analysis
+    # 1. VLM image analysis
     image_facts = _analyze_images(req.images) if req.images else []
 
-    # 3. BM25 retrieval
-    retrieve_q = query
-    if image_facts:
-        retrieve_q = f"{query} {' '.join(image_facts[:2])}"
+    # 2. Vector retrieval
+    retrieve_q = f"{query} {' '.join(image_facts[:2])}" if image_facts else query
     docs = _retrieve(retrieve_q)
-    evidence = _pick_sentences(query, docs)
+    evidence = [f"[{doc.title}] {doc.content}" for doc in docs[:TOP_K]]
     image_ids = _collect_image_ids(docs)
 
-    # 4. LLM generation
+    # 3. LLM generation
     if not API_KEY:
         answer = "您好，服务暂时不可用，请稍后重试。"
     else:
         try:
             answer = _generate_answer(query, evidence, image_facts, memory, req.images)
-        except Exception as e:
-            answer = f"您好，处理您的问题时遇到错误，请稍后重试。"
+        except Exception:
+            answer = "您好，处理您的问题时遇到错误，请稍后重试。"
 
-    # 5. Attach image IDs
+    # 4. Attach image IDs
     if image_ids:
         if "<PIC>" not in answer:
             answer = f"{answer} <PIC>"
@@ -446,7 +400,7 @@ def _handle(req: ChatRequest) -> str:
 
 # ─── FastAPI App ──────────────────────────────────────────────────────────────
 
-app = FastAPI(title="DF1165 Multimodal CS Agent", version="3.0.0")
+app = FastAPI(title="DF1165 Multimodal CS Agent", version="4.0.0")
 
 
 @app.get("/health")
@@ -454,8 +408,10 @@ def health() -> dict:
     return {
         "ok": True,
         "knowledge_docs": len(KNOWLEDGE),
+        "embed_vecs": len(_EMBED_VECS),
         "chat_model": CHAT_MODEL,
         "vlm_model": VLM_MODEL,
+        "embed_model": EMBED_MODEL,
         "has_api_key": bool(API_KEY),
     }
 
