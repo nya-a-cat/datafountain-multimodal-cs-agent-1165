@@ -33,14 +33,35 @@ ROOT = Path(__file__).resolve().parents[1]
 KNOWLEDGE_PATH = ROOT / "data" / "knowledge.jsonl"
 EMBEDDINGS_PATH = ROOT / "data" / "embeddings.jsonl"
 
-CHAT_MODEL = os.getenv("CHAT_MODEL", "Qwen/Qwen3.6-35B-A3B")
-VLM_MODEL = os.getenv("VLM_MODEL", "Qwen/Qwen3.6-35B-A3B")
-EMBED_MODEL = "Qwen/Qwen3-VL-Embedding-8B"
-RERANK_MODEL = os.getenv("RERANK_MODEL", "Qwen/Qwen3-VL-Reranker-8B")
+# Provider: "siliconflow" (default) or "bailian" (Alibaba Cloud)
+PROVIDER = os.getenv("PROVIDER", "siliconflow")
+
+_PROVIDER_DEFAULTS = {
+    "siliconflow": {
+        "api_base": "https://api.siliconflow.cn/v1",
+        "chat_model": "Qwen/Qwen3.6-35B-A3B",
+        "vlm_model": "Qwen/Qwen3.6-35B-A3B",
+        "embed_model": "Qwen/Qwen3-VL-Embedding-8B",
+        "rerank_model": "Qwen/Qwen3-VL-Reranker-8B",
+    },
+    "bailian": {
+        "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "chat_model": "qwen3.6-plus-2026-04-02",
+        "vlm_model": "qwen3.6-plus-2026-04-02",
+        "embed_model": "qwen3-vl-embedding",
+        "rerank_model": "qwen3-vl-rerank",
+    },
+}
+
+_defaults = _PROVIDER_DEFAULTS.get(PROVIDER, _PROVIDER_DEFAULTS["siliconflow"])
+API_BASE = os.getenv("OPENAI_BASE_URL", _defaults["api_base"])
+API_KEY = os.getenv("OPENAI_API_KEY", os.getenv("SILICONFLOW_API_KEY", os.getenv("DASHSCOPE_API_KEY", "")))
+CHAT_MODEL = os.getenv("CHAT_MODEL", _defaults["chat_model"])
+VLM_MODEL = os.getenv("VLM_MODEL", _defaults["vlm_model"])
+EMBED_MODEL = os.getenv("EMBED_MODEL", _defaults["embed_model"])
+RERANK_MODEL = os.getenv("RERANK_MODEL", _defaults["rerank_model"])
 USE_RERANKER = os.getenv("USE_RERANKER", "1") == "1"
-RERANK_TOP_N = 50  # candidates to rerank before selecting TOP_K
-API_BASE = os.getenv("OPENAI_BASE_URL", "https://api.siliconflow.cn/v1")
-API_KEY = os.getenv("OPENAI_API_KEY", os.getenv("SILICONFLOW_API_KEY", ""))
+RERANK_TOP_N = 50
 KAFU_API_TOKEN = os.getenv("KAFU_API_TOKEN", "")
 
 MAX_IMAGES = 3
@@ -308,6 +329,8 @@ def _analyze_images(images: list[str]) -> list[str]:
 
 _SYSTEM_PROMPT = """你是一个专业的多模态电商客服智能体。
 
+语言规则：用户用什么语言提问，就用对应语言回答。
+
 回答规则：
 1. 优先使用知识库证据回答产品相关问题
 2. 电商政策问题（退货/退款/发票/物流/乡镇配送/国际配送/投诉等）直接用内置政策知识回答，无需知识库
@@ -407,6 +430,7 @@ app = FastAPI(title="DF1165 Multimodal CS Agent", version="4.0.0")
 def health() -> dict:
     return {
         "ok": True,
+        "provider": PROVIDER,
         "knowledge_docs": len(KNOWLEDGE),
         "embed_vecs": len(_EMBED_VECS),
         "chat_model": CHAT_MODEL,
