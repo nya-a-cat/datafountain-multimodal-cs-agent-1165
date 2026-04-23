@@ -35,8 +35,8 @@ from pydantic import BaseModel, Field, model_validator
 ROOT = Path(__file__).resolve().parents[1]
 KNOWLEDGE_PATH = ROOT / "data" / "knowledge.jsonl"
 
-CHAT_MODEL = os.getenv("CHAT_MODEL", "zai-org/GLM-4.5V")
-VLM_MODEL = os.getenv("VLM_MODEL", "zai-org/GLM-4.5V")
+CHAT_MODEL = os.getenv("CHAT_MODEL", "Qwen/Qwen3.5-397B-A17B")
+VLM_MODEL = os.getenv("VLM_MODEL", "Qwen/Qwen3.5-397B-A17B")
 API_BASE = os.getenv("OPENAI_BASE_URL", "https://api.siliconflow.cn/v1")
 API_KEY = os.getenv("OPENAI_API_KEY", os.getenv("SILICONFLOW_API_KEY", ""))
 KAFU_API_TOKEN = os.getenv("KAFU_API_TOKEN", "")
