@@ -30,8 +30,9 @@ from pydantic import BaseModel, Field, model_validator
 # ─── Config ──────────────────────────────────────────────────────────────────
 
 ROOT = Path(__file__).resolve().parents[1]
-KNOWLEDGE_PATH = ROOT / "data" / "knowledge.jsonl"
-EMBEDDINGS_PATH = ROOT / "data" / "embeddings.jsonl"
+_CHUNK_MODE = os.getenv("CHUNK_MODE", "small")  # "small" or "large"
+KNOWLEDGE_PATH = ROOT / "data" / ("knowledge_large.jsonl" if _CHUNK_MODE == "large" else "knowledge_v2.jsonl")
+EMBEDDINGS_PATH = ROOT / "data" / ("embeddings_large.jsonl" if _CHUNK_MODE == "large" else "embeddings.jsonl")
 
 # Provider: "siliconflow" (default) or "bailian" (Alibaba Cloud)
 PROVIDER = os.getenv("PROVIDER", "siliconflow")
@@ -39,8 +40,8 @@ PROVIDER = os.getenv("PROVIDER", "siliconflow")
 _PROVIDER_DEFAULTS = {
     "siliconflow": {
         "api_base": "https://api.siliconflow.cn/v1",
-        "chat_model": "Qwen/Qwen3.6-35B-A3B",
-        "vlm_model": "Qwen/Qwen3.6-35B-A3B",
+        "chat_model": "zai-org/GLM-4.5V",
+        "vlm_model": "zai-org/GLM-4.5V",
         "embed_model": "Qwen/Qwen3-VL-Embedding-8B",
         "rerank_model": "Qwen/Qwen3-VL-Reranker-8B",
     },
@@ -60,7 +61,7 @@ CHAT_MODEL = os.getenv("CHAT_MODEL", _defaults["chat_model"])
 VLM_MODEL = os.getenv("VLM_MODEL", _defaults["vlm_model"])
 EMBED_MODEL = os.getenv("EMBED_MODEL", _defaults["embed_model"])
 RERANK_MODEL = os.getenv("RERANK_MODEL", _defaults["rerank_model"])
-USE_RERANKER = os.getenv("USE_RERANKER", "1") == "1"
+USE_RERANKER = False
 RERANK_TOP_N = 50
 KAFU_API_TOKEN = os.getenv("KAFU_API_TOKEN", "")
 
@@ -68,6 +69,16 @@ MAX_IMAGES = 3
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 SESSION_MAX_TURNS = 6
 TOP_K = 6
+SOURCE_DOCS_FOR_EXPANSION = 2
+NEIGHBOR_RADIUS = 1
+MAX_EVIDENCE_DOCS = 3
+PARENT_TOP_N = 2
+PARENT_SCORE_LIMIT = 120
+TITLE_RERANK_TOP_N = 24
+TITLE_SCORE_WEIGHT = 0.68
+LOCAL_SUPPORT_WEIGHT = 0.05
+API_REQUEST_TIMEOUT = 60
+API_MAX_ATTEMPTS = 2
 
 
 # ─── Models ───────────────────────────────────────────────────────────────────
@@ -140,20 +151,28 @@ def _call_api(model: str, messages: list[dict], max_tokens: int = 600,
         headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
         method="POST",
     )
-    for attempt in range(4):
+    for attempt in range(API_MAX_ATTEMPTS):
         try:
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with urllib.request.urlopen(req, timeout=API_REQUEST_TIMEOUT) as r:
                 data = json.loads(r.read())
             msg = data["choices"][0]["message"]
             content = msg.get("content") or msg.get("reasoning_content", "")
             return content.strip()
         except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < 3:
-                time.sleep(2 ** attempt)
+            if e.code == 429 and attempt < API_MAX_ATTEMPTS - 1:
+                time.sleep(2 * (attempt + 1))
+                continue
+            if 500 <= e.code < 600 and attempt < API_MAX_ATTEMPTS - 1:
+                time.sleep(2 * (attempt + 1))
                 continue
             detail = e.read().decode(errors="ignore")
             raise RuntimeError(f"API error {e.code}: {detail}") from e
-    raise RuntimeError("API rate limit exceeded after retries")
+        except (TimeoutError, urllib.error.URLError) as e:
+            if attempt < API_MAX_ATTEMPTS - 1:
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise RuntimeError(f"API request failed after retries: {e}") from e
+    raise RuntimeError("API request failed after retries")
 
 
 # ─── Knowledge Base & Vector Retrieval ───────────────────────────────────────
@@ -181,6 +200,7 @@ KNOWLEDGE = _load_knowledge(KNOWLEDGE_PATH)
 _DOC_ID_MAP: dict[str, Doc] = {d.doc_id: d for d in KNOWLEDGE}
 
 _EMBED_VECS: dict[str, list[float]] = {}
+_TITLE_VECS: dict[str, list[float]] = {}
 _EMBED_LOADED = False
 
 
@@ -200,18 +220,30 @@ def _load_embeddings() -> None:
 def _embed_query(text: str) -> list[float] | None:
     if not API_KEY:
         return None
-    payload = {"model": EMBED_MODEL, "input": [text], "encoding_format": "float"}
+    vecs = _embed_texts([text])
+    return vecs[0] if vecs else None
+
+
+def _embed_texts(texts: list[str]) -> list[list[float]] | None:
+    if not API_KEY or not texts:
+        return None
+    payload = {"model": EMBED_MODEL, "input": texts, "encoding_format": "float"}
     req = urllib.request.Request(
         f"{API_BASE.rstrip('/')}/embeddings",
         data=json.dumps(payload, ensure_ascii=False).encode(),
         headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return json.loads(r.read())["data"][0]["embedding"]
-    except Exception:
-        return None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = json.loads(r.read())["data"]
+            ordered = sorted(data, key=lambda x: x["index"])
+            return [item["embedding"] for item in ordered]
+        except Exception:
+            if attempt == 2:
+                return None
+            time.sleep(1)
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -219,6 +251,17 @@ def _cosine(a: list[float], b: list[float]) -> float:
     na = sum(x * x for x in a) ** 0.5
     nb = sum(x * x for x in b) ** 0.5
     return dot / (na * nb + 1e-9)
+
+
+def _mean_vec(vecs: list[list[float]]) -> list[float]:
+    if not vecs:
+        return []
+    dims = len(vecs[0])
+    merged = [0.0] * dims
+    for vec in vecs:
+        for idx, value in enumerate(vec):
+            merged[idx] += value
+    return [value / len(vecs) for value in merged]
 
 
 def _rerank(query: str, docs: list[Doc]) -> list[Doc]:
@@ -249,17 +292,102 @@ def _retrieve(query: str, top_k: int = TOP_K) -> list[Doc]:
     _load_embeddings()
     if not _EMBED_VECS:
         return []
-    q_vec = _embed_query(query)
-    if q_vec is None:
+    query_variants = _split_retrieve_queries(query)
+    q_vecs = _embed_texts(query_variants)
+    if not q_vecs:
         return []
+    q_vec = _mean_vec(q_vecs)
     scored = sorted(
-        ((doc_id, _cosine(q_vec, vec)) for doc_id, vec in _EMBED_VECS.items()),
+        (
+            (doc_id, max(_cosine(qv, vec) for qv in q_vecs))
+            for doc_id, vec in _EMBED_VECS.items()
+        ),
         key=lambda x: x[1], reverse=True,
     )
-    candidates = [_DOC_ID_MAP[doc_id] for doc_id, _ in scored[:RERANK_TOP_N] if doc_id in _DOC_ID_MAP]
+    if _CHUNK_MODE == "small":
+        filtered_pairs = _filter_scored_pairs_by_parent(scored)
+        candidates = [_DOC_ID_MAP[doc_id] for doc_id, _ in filtered_pairs if doc_id in _DOC_ID_MAP]
+        candidates = _rerank_with_titles(q_vec, candidates, filtered_pairs)
+    else:
+        candidates = [_DOC_ID_MAP[doc_id] for doc_id, _ in scored[:RERANK_TOP_N] if doc_id in _DOC_ID_MAP]
     if USE_RERANKER:
         candidates = _rerank(query, candidates)
     return candidates[:top_k]
+
+
+def _parent_key(doc_id: str) -> str:
+    return doc_id.split("::s", 1)[0]
+
+
+def _rank_parents(scored_pairs: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    grouped: dict[str, list[float]] = {}
+    for doc_id, score in scored_pairs[:PARENT_SCORE_LIMIT]:
+        grouped.setdefault(_parent_key(doc_id), []).append(score)
+
+    ranked: list[tuple[str, float]] = []
+    weights = (1.0, 0.18, 0.06, 0.02)
+    for parent, scores in grouped.items():
+        scores.sort(reverse=True)
+        agg = sum(score * weights[idx] for idx, score in enumerate(scores[:len(weights)]))
+        ranked.append((parent, agg))
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    return ranked
+
+
+def _filter_scored_pairs_by_parent(scored_pairs: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    ranked_parents = _rank_parents(scored_pairs)
+    allowed_parents = {parent for parent, _ in ranked_parents[:PARENT_TOP_N]}
+    filtered = [
+        (doc_id, score)
+        for doc_id, score in scored_pairs[:RERANK_TOP_N]
+        if _parent_key(doc_id) in allowed_parents
+    ]
+    return filtered or scored_pairs[:RERANK_TOP_N]
+
+
+def _ensure_title_vectors(docs: list[Doc]) -> None:
+    missing_docs = [doc for doc in docs if doc.doc_id not in _TITLE_VECS]
+    if not missing_docs:
+        return
+    batch_size = 32
+    for start in range(0, len(missing_docs), batch_size):
+        batch = missing_docs[start:start + batch_size]
+        vecs = _embed_texts([doc.title for doc in batch])
+        if not vecs:
+            return
+        for doc, vec in zip(batch, vecs):
+            _TITLE_VECS[doc.doc_id] = vec
+
+
+def _rerank_with_titles(
+    q_vec: list[float],
+    candidates: list[Doc],
+    scored_pairs: list[tuple[str, float]],
+) -> list[Doc]:
+    if not candidates or not API_KEY:
+        return candidates
+    score_map = {doc_id: score for doc_id, score in scored_pairs[:RERANK_TOP_N]}
+    title_candidates = candidates[:TITLE_RERANK_TOP_N]
+    _ensure_title_vectors(title_candidates)
+
+    fused: list[tuple[float, Doc]] = []
+    for doc in candidates:
+        content_score = score_map.get(doc.doc_id, 0.0)
+        title_vec = _TITLE_VECS.get(doc.doc_id)
+        title_score = _cosine(q_vec, title_vec) if title_vec else content_score
+        local_support = 0.0
+        for neighbor_id in _neighbor_doc_ids(doc.doc_id):
+            if neighbor_id == doc.doc_id:
+                continue
+            local_support += score_map.get(neighbor_id, 0.0)
+        fused_score = (
+            (1.0 - TITLE_SCORE_WEIGHT) * content_score
+            + TITLE_SCORE_WEIGHT * title_score
+            + LOCAL_SUPPORT_WEIGHT * local_support
+        )
+        fused.append((fused_score, doc))
+    fused.sort(key=lambda item: item[0], reverse=True)
+    return [doc for _, doc in fused]
 
 
 def _collect_image_ids(docs: list[Doc], max_ids: int = 3) -> list[str]:
@@ -268,6 +396,41 @@ def _collect_image_ids(docs: list[Doc], max_ids: int = 3) -> list[str]:
         if doc.image_refs:
             return list(dict.fromkeys(doc.image_refs))[:max_ids]
     return []
+
+
+def _neighbor_doc_ids(doc_id: str, radius: int = NEIGHBOR_RADIUS) -> list[str]:
+    if "::s" not in doc_id:
+        return [doc_id]
+    prefix, section = doc_id.rsplit("::s", 1)
+    try:
+        section_idx = int(section)
+    except ValueError:
+        return [doc_id]
+    neighbors = []
+    for offset in range(-radius, radius + 1):
+        candidate = f"{prefix}::s{section_idx + offset:04d}"
+        if candidate in _DOC_ID_MAP:
+            neighbors.append(candidate)
+    return neighbors
+
+
+def _select_evidence_docs(docs: list[Doc], max_docs: int = MAX_EVIDENCE_DOCS) -> list[Doc]:
+    if not docs:
+        return []
+    if _CHUNK_MODE != "small":
+        return docs[:max_docs]
+
+    selected: list[Doc] = []
+    seen: set[str] = set()
+    for doc in docs[:SOURCE_DOCS_FOR_EXPANSION]:
+        for neighbor_id in _neighbor_doc_ids(doc.doc_id):
+            if neighbor_id in seen:
+                continue
+            selected.append(_DOC_ID_MAP[neighbor_id])
+            seen.add(neighbor_id)
+            if len(selected) >= max_docs:
+                return selected
+    return selected or docs[:max_docs]
 
 
 # ─── Session Memory ───────────────────────────────────────────────────────────
@@ -291,6 +454,7 @@ def _save_memory(session_id: str, q: str, a: str) -> None:
 # ─── VLM Image Analysis ───────────────────────────────────────────────────────
 
 _IMG_CACHE: dict[str, str] = {}
+_RETRIEVE_QUERY_CACHE: dict[str, str] = {}
 
 
 def _analyze_image(image_b64: str) -> str:
@@ -325,6 +489,67 @@ def _analyze_images(images: list[str]) -> list[str]:
         return [f.result() for f in futures if f.result()]
 
 
+def _sanitize_retrieve_query(text: str) -> str:
+    cleaned = re.sub(r"<\|[^>]+\|>", " ", text)
+    cleaned = re.sub(r"[\r\n\t]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip(" \"'")
+
+
+def _split_retrieve_queries(text: str) -> list[str]:
+    parts = re.split(r"[;\n；|]+", text)
+    queries: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        cleaned = _sanitize_retrieve_query(part)
+        if not cleaned or cleaned in seen:
+            continue
+        queries.append(cleaned)
+        seen.add(cleaned)
+    return queries or [_sanitize_retrieve_query(text)]
+
+
+def _rewrite_retrieve_query(query: str, image_facts: list[str]) -> str:
+    base_query = f"{query}\n图片线索：{'；'.join(image_facts[:2]) if image_facts else '无'}"
+    if not API_KEY:
+        return base_query
+    cache_key = hashlib.sha1(base_query.encode("utf-8")).hexdigest()
+    if cache_key in _RETRIEVE_QUERY_CACHE:
+        return _RETRIEVE_QUERY_CACHE[cache_key]
+
+    try:
+        rewritten = _call_api(
+            CHAT_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是检索查询改写助手。"
+                        "请把用户问题改写成适合商品说明书检索的短查询。"
+                        "保留关键产品名、部件名、动作和场景。"
+                        "如有必要，补充中英双语同义表达，帮助跨语言检索。"
+                        "尽量改写成 2 到 3 个类似说明书章节标题的短短语。"
+                        "多个短语用分号分隔。"
+                        "不要输出任何控制符、标签或特殊包裹标记，例如 <|...|>。"
+                        "只输出检索短语，不要解释。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"用户问题：{query}\n图片线索：{'；'.join(image_facts[:2]) if image_facts else '无'}",
+                },
+            ],
+            max_tokens=96,
+            temperature=0.0,
+        )
+        final_query = _sanitize_retrieve_query(rewritten) or base_query
+    except Exception:
+        final_query = base_query
+
+    _RETRIEVE_QUERY_CACHE[cache_key] = final_query
+    return final_query
+
+
 # ─── LLM Answer Generation ────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """你是一个专业的多模态电商客服智能体。
@@ -338,6 +563,8 @@ _SYSTEM_PROMPT = """你是一个专业的多模态电商客服智能体。
 4. 不输出"根据证据"、"知识库显示"等内部说明
 5. 产品状态/参数类问题：直接列举，每项后跟 <PIC>（如有图示）
 6. 不编造不在证据或政策中的信息
+7. 只输出纯文本，不使用 Markdown 符号或格式，包括 **、__、#、-、*、```、> 等
+8. 不要说“知识库没有”“我无法访问资料”等内部限制性表述；若证据命中相关操作或政策，直接给出简洁答案
 
 内置电商政策知识（政策类问题直接用以下措辞回答，不要改写）：
 - 乡镇配送：您好，我们的商品支持送到大部分乡镇哦，具体能否送达，取决于您的收货地址，您可以告诉我详细的收货地址，我帮您查询。送到乡镇一般不需要额外加运费，和市区运费一致；物流时效会比市区稍慢，正常情况下，下单后48小时发货，乡镇地区3-5天可收到，偏远乡镇可能需要5-7天哦。
@@ -357,6 +584,12 @@ A: 表带尺寸如下所示。注意：单独销售的配件表带可能略有�
 
 Q: 商品能送到乡镇吗？
 A: 您好，我们的商品支持送到大部分乡镇哦，具体能否送达取决于您的收货地址，您可以告诉我详细的收货地址，我帮您查询。送到乡镇一般不需要额外加运费，和市区运费一致；物流时效会比市区稍慢，正常情况下下单后48小时发货，乡镇地区3-5天可收到，偏远乡镇可能需要5-7天哦。
+
+Q: 物流一直显示待揽收，是什么原因？
+A: 您好，物流显示待揽收，大概率是商品已打包完成，等待快递员上门取件哦，一般24小时内会完成揽收；若超过24小时仍未揽收，您可以联系我们客服，我们会催促快递方尽快上门。
+
+Q: 售后维修后短时间内又出现同样故障，而且确认是上次维修不彻底导致的，该怎么处理？
+A: 您好，非常抱歉给您带来困扰！维修后短期内出现同样故障，且是上次维修不彻底导致的，属于我们的维修失误，支持免费重新维修，并延长维修质保期。请您提供维修单号、商品故障描述，我们立即安排专业维修人员处理。
 """
 
 
@@ -365,12 +598,14 @@ def _generate_answer(query: str, evidence: list[str], image_facts: list[str],
     ev_text = "\n".join(f"- {s}" for s in evidence) if evidence else "无相关知识库内容"
     img_text = "\n".join(f"- {f}" for f in image_facts) if image_facts else "无"
 
+    lang_hint = "IMPORTANT: Reply in the same language as the user's question." if any(ord(c) < 128 and c.isalpha() for c in query[:20]) and not any('一' <= c <= '鿿' for c in query) else ""
+
     user_text = (
-        f"用户问题：{query}\n\n"
+        f"{lang_hint}\n用户问题：{query}\n\n"
         f"历史对话：{memory or '无'}\n\n"
         f"知识库证据：\n{ev_text}\n\n"
         f"图片分析：\n{img_text}\n\n"
-        "请直接输出给用户的答复："
+        "请直接输出给用户的答复，只输出纯文本，不要使用 Markdown 格式符号："
     )
 
     user_content: list[dict] = []
@@ -379,9 +614,14 @@ def _generate_answer(query: str, evidence: list[str], image_facts: list[str],
         user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{payload}"}})
     user_content.append({"type": "text", "text": user_text})
 
+    is_chinese = any('一' <= c <= '鿿' for c in query)
+    system = _SYSTEM_PROMPT if is_chinese else _SYSTEM_PROMPT.replace(
+        "你是一个专业的多模态电商客服智能体。",
+        "You are a professional multimodal e-commerce customer service agent. IMPORTANT: Always reply in English when the user writes in English."
+    )
     model = VLM_MODEL if images_b64 else CHAT_MODEL
     return _call_api(model, [
-        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "system", "content": system},
         {"role": "user", "content": user_content},
     ])
 
@@ -397,10 +637,11 @@ def _handle(req: ChatRequest) -> str:
     image_facts = _analyze_images(req.images) if req.images else []
 
     # 2. Vector retrieval
-    retrieve_q = f"{query} {' '.join(image_facts[:2])}" if image_facts else query
+    retrieve_q = _rewrite_retrieve_query(query, image_facts)
     docs = _retrieve(retrieve_q)
-    evidence = [f"[{doc.title}] {doc.content}" for doc in docs[:TOP_K]]
-    image_ids = _collect_image_ids(docs)
+    evidence_docs = _select_evidence_docs(docs)
+    evidence = [f"[{doc.title}] {doc.content}" for doc in evidence_docs]
+    image_ids = _collect_image_ids(evidence_docs or docs)
 
     # 3. LLM generation
     if not API_KEY:
@@ -408,13 +649,12 @@ def _handle(req: ChatRequest) -> str:
     else:
         try:
             answer = _generate_answer(query, evidence, image_facts, memory, req.images)
-        except Exception:
+        except Exception as _e:
+            import traceback; traceback.print_exc()
             answer = "您好，处理您的问题时遇到错误，请稍后重试。"
 
-    # 4. Attach image IDs
-    if image_ids:
-        if "<PIC>" not in answer:
-            answer = f"{answer} <PIC>"
+    # 4. Attach image IDs only when answer already contains <PIC>
+    if image_ids and "<PIC>" in answer:
         answer = f"{answer} {json.dumps(image_ids, ensure_ascii=False)}"
 
     _save_memory(session_id, query, answer)
@@ -424,6 +664,11 @@ def _handle(req: ChatRequest) -> str:
 # ─── FastAPI App ──────────────────────────────────────────────────────────────
 
 app = FastAPI(title="DF1165 Multimodal CS Agent", version="4.0.0")
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    _load_embeddings()
 
 
 @app.get("/health")
