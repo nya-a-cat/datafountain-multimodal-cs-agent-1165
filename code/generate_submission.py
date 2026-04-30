@@ -29,6 +29,18 @@ WORD_RE = re.compile(r"[\u4e00-\u9fff]+|[A-Za-z0-9_]+")
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff")
 MAX_ATTACH_IMAGES = 3
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
+BAD_ANSWER_MARKERS = (
+    "我们要求",
+    "我们被问到",
+    "我们分析",
+    "用户问",
+    "知识库证据",
+    "根据规则",
+    "处理您的问题时遇到错误",
+    "系统暂时不可用",
+    "I don't have specific",
+    "please refer to the user manual",
+)
 
 
 class KnowledgeDoc:
@@ -96,8 +108,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--workers",
         type=int,
-        default=8,
+        default=16,
         help="Number of parallel workers for API calls",
+    )
+    parser.add_argument(
+        "--flush-every",
+        type=int,
+        default=10,
+        help="Write partial results every N completed answers",
+    )
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Ignore existing output file and regenerate all answers",
     )
     return parser.parse_args()
 
@@ -286,6 +309,24 @@ def write_submission(path: Path, rows: list[tuple[str, str]]) -> None:
             writer.writerow([qid, normalize_answer(ret)])
 
 
+def _is_bad_answer(text: str) -> bool:
+    return (not text.strip()) or any(marker in text for marker in BAD_ANSWER_MARKERS)
+
+
+def read_existing_submission(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    out: dict[str, str] = {}
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            qid = str(row.get("id", "")).strip()
+            ret = str(row.get("ret", "")).strip()
+            if qid and ret:
+                out[qid] = ret
+    return out
+
+
 def _process_one(
     idx: int,
     qid: str,
@@ -311,17 +352,33 @@ def main() -> None:
 
     total = len(questions)
     results: dict[int, tuple[str, str]] = {}
-    done = 0
+    existing = {} if args.no_resume else read_existing_submission(args.out_file)
+    for i, (qid, _qtext) in enumerate(questions):
+        ret = existing.get(qid, "")
+        if ret and not _is_bad_answer(ret):
+            results[i] = (qid, ret)
+
+    pending = [
+        (i, qid, qtext)
+        for i, (qid, qtext) in enumerate(questions)
+        if i not in results
+    ]
+    done = len(results)
+    if done:
+        print(f"Resuming: {done}/{total} good existing answers, {len(pending)} pending")
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {
             pool.submit(_process_one, i, qid, qtext, args, docs, image_index): i
-            for i, (qid, qtext) in enumerate(questions)
+            for i, qid, qtext in pending
         }
         for future in as_completed(futures):
             idx, qid, answer = future.result()
             results[idx] = (qid, answer)
             done += 1
+            if args.flush_every > 0 and (done % args.flush_every == 0):
+                partial_rows = [results[i] for i in sorted(results)]
+                write_submission(args.out_file, partial_rows)
             if done % 20 == 0 or done == total:
                 print(f"\r[{done}/{total}] answers received", end="", flush=True)
 

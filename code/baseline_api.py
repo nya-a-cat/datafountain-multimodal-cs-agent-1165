@@ -192,12 +192,14 @@ def _validate_b64_image(image: str) -> None:
 
 
 def _call_api(model: str, messages: list[dict], max_tokens: int = 600,
-              temperature: float = 0.2) -> str:
+              temperature: float = 0.2, json_mode: bool = False) -> str:
     if not API_KEY:
         raise RuntimeError("API key not set")
     payload = {"model": model, "messages": messages,
                "temperature": temperature, "top_p": 0.8, "max_tokens": max_tokens,
-               "enable_thinking": False}
+               "thinking": {"type": "disabled"}}
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}
     req = urllib.request.Request(
         f"{API_BASE.rstrip('/')}/chat/completions",
         data=json.dumps(payload, ensure_ascii=False).encode(),
@@ -209,7 +211,7 @@ def _call_api(model: str, messages: list[dict], max_tokens: int = 600,
             with urllib.request.urlopen(req, timeout=API_REQUEST_TIMEOUT) as r:
                 data = json.loads(r.read())
             msg = data["choices"][0]["message"]
-            content = msg.get("content") or msg.get("reasoning_content", "")
+            content = msg.get("content") or ""
             return content.strip()
         except urllib.error.HTTPError as e:
             if e.code == 429 and attempt < API_MAX_ATTEMPTS - 1:
@@ -780,19 +782,94 @@ A: 您好，非常抱歉给您带来困扰！维修后短期内出现同样故�
 """
 
 
+_ANSWER_LEAK_PATTERNS = (
+    "我们要求",
+    "我们被问到",
+    "我们分析",
+    "我们需要",
+    "用户问",
+    "用户问题",
+    "知识库证据",
+    "根据规则",
+    "规则",
+    "不能编造",
+    "我无法访问",
+    "知识库未找到",
+    "没有直接",
+    "没有明确",
+    "I don't have specific",
+    "please refer to the user manual",
+)
+
+
+def _parse_answer_json(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    try:
+        obj = json.loads(cleaned)
+        if isinstance(obj, dict):
+            answer = obj.get("answer")
+            if isinstance(answer, str):
+                return answer.strip()
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r'"answer"\s*:\s*"((?:[^"\\]|\\.)*)"', cleaned, re.DOTALL)
+    if match:
+        try:
+            return json.loads(f'"{match.group(1)}"').strip()
+        except json.JSONDecodeError:
+            return match.group(1).strip()
+    return cleaned
+
+
+def _sanitize_answer(text: str) -> str:
+    answer = _parse_answer_json(text)
+    answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.DOTALL | re.IGNORECASE)
+    answer = answer.replace("in the provided evidence", "").replace("in the available documentation", "")
+    answer = answer.replace("provided evidence", "manual").replace("available documentation", "manual")
+    answer = answer.replace("```", "")
+    answer = " ".join(answer.replace("\r", " ").replace("\n", " ").split())
+    for marker in ("最终答案：", "最终答案:", "Final answer:", "Answer:"):
+        if marker in answer:
+            answer = answer.rsplit(marker, 1)[1].strip()
+    return answer.strip(" \"'")
+
+
+def _looks_like_answer_leak(text: str) -> bool:
+    return any(pattern in text for pattern in _ANSWER_LEAK_PATTERNS)
+
+
+def _fallback_answer_from_evidence(evidence: list[str]) -> str:
+    for item in evidence:
+        text = item.strip()
+        if not text or text == "无相关知识库内容":
+            continue
+        if "：" in text and not text.startswith("["):
+            text = text.split("：", 1)[1].strip()
+        text = re.sub(r"^\[[^\]]+\]\s*", "", text)
+        text = re.sub(r"^#+\s*", "", text).strip()
+        if text:
+            return text[:900].strip()
+    return "请提供订单号或商品信息，我们会为您进一步核实处理。"
+
+
 def _generate_answer(query: str, evidence: list[str], image_facts: list[str],
                      memory: str, images_b64: list[str]) -> str:
     ev_text = "\n".join(f"- {s}" for s in evidence) if evidence else "无相关知识库内容"
     img_text = "\n".join(f"- {f}" for f in image_facts) if image_facts else "无"
 
-    lang_hint = "IMPORTANT: Reply in the same language as the user's question." if any(ord(c) < 128 and c.isalpha() for c in query[:20]) and not any('一' <= c <= '鿿' for c in query) else ""
+    english_query = any(ord(c) < 128 and c.isalpha() for c in query[:20]) and not any('一' <= c <= '鿿' for c in query)
+    lang_hint = "Answer in English." if english_query else "用中文回答。"
 
     user_text = (
-        f"{lang_hint}\n用户问题：{query}\n\n"
-        f"历史对话：{memory or '无'}\n\n"
-        f"知识库证据：\n{ev_text}\n\n"
-        f"图片分析：\n{img_text}\n\n"
-        "请直接输出给用户的答复，只输出纯文本，不要使用 Markdown 格式符号："
+        f"Question:\n{query}\n\n"
+        f"Conversation memory:\n{memory or 'None'}\n\n"
+        f"Evidence or policy text:\n{ev_text}\n\n"
+        f"Image facts:\n{img_text}\n\n"
+        f"Language rule: {lang_hint}\n"
+        "Write the final customer-facing answer only in the JSON field `answer`."
     )
 
     user_content: list[dict] = []
@@ -800,17 +877,31 @@ def _generate_answer(query: str, evidence: list[str], image_facts: list[str],
         payload = _extract_b64(img)
         user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{payload}"}})
     user_content.append({"type": "text", "text": user_text})
+    user_payload: str | list[dict] = user_content if len(user_content) > 1 else user_text
 
-    is_chinese = any('一' <= c <= '鿿' for c in query)
-    system = _SYSTEM_PROMPT if is_chinese else _SYSTEM_PROMPT.replace(
-        "你是一个专业的多模态电商客服智能体。",
-        "You are a professional multimodal e-commerce customer service agent. IMPORTANT: Always reply in English when the user writes in English."
+    system = (
+        "You are the final-answer writer for a product manual and e-commerce policy QA system. "
+        "Return JSON only: {\"answer\":\"...\"}. "
+        "The answer value must be the exact final text shown to the user. "
+        "Never include reasoning, analysis, rules, evidence labels, knowledge-base discussion, or self-correction. "
+        "Do not say that information is unavailable, do not ask for model details, and do not tell the user to check a manual. "
+        "Forbidden phrases include: provided evidence, available documentation, not described, refer to, I don't have specific information. "
+        "Use only the supplied evidence/policy text; if exact details are thin, provide the closest concise answer supported by it. "
+        "Keep <PIC> placeholders from relevant evidence. Do not use Markdown or numbered lists."
     )
     model = VLM_MODEL if images_b64 and SUPPORTS_IMAGE_INPUTS else CHAT_MODEL
-    return _call_api(model, [
+    raw = _call_api(model, [
         {"role": "system", "content": system},
-        {"role": "user", "content": user_content},
-    ])
+        {"role": "user", "content": user_payload},
+    ], max_tokens=700, temperature=0.0, json_mode=not (images_b64 and SUPPORTS_IMAGE_INPUTS))
+    answer = _sanitize_answer(raw)
+    if _looks_like_answer_leak(answer):
+        repair_raw = _call_api(CHAT_MODEL, [
+            {"role": "system", "content": system + " Repair the draft. Output JSON only."},
+            {"role": "user", "content": f"Question:\n{query}\n\nBad draft:\n{answer}\n\nEvidence:\n{ev_text}\n\nReturn only {{\"answer\":\"...\"}}."},
+        ], max_tokens=500, temperature=0.0, json_mode=True)
+        answer = _sanitize_answer(repair_raw)
+    return answer
 
 
 # ─── Main Handler ─────────────────────────────────────────────────────────────
@@ -843,9 +934,11 @@ def _handle(req: ChatRequest) -> str:
     else:
         try:
             answer = _generate_answer(query, evidence, image_facts, memory, req.images)
+            if not answer or _looks_like_answer_leak(answer):
+                answer = _fallback_answer_from_evidence(evidence)
         except Exception as _e:
             import traceback; traceback.print_exc()
-            answer = "您好，处理您的问题时遇到错误，请稍后重试。"
+            answer = _fallback_answer_from_evidence(evidence)
 
     # 4. Attach image IDs only when answer already contains <PIC>
     if image_ids and "<PIC>" in answer:
