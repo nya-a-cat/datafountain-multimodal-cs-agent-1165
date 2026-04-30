@@ -95,6 +95,7 @@ API_REQUEST_TIMEOUT = 60
 API_MAX_ATTEMPTS = 2
 SUPPORTS_IMAGE_INPUTS = PROVIDER in {"siliconflow", "bailian"}
 SUPPORTS_EMBEDDINGS = not (PROVIDER == "deepseek" and EMBED_API_BASE.rstrip("/") == API_BASE.rstrip("/"))
+USE_VECTOR_RETRIEVAL = os.getenv("USE_VECTOR_RETRIEVAL", "1" if SUPPORTS_EMBEDDINGS else "0") == "1"
 WORD_RE = re.compile(r"[\u4e00-\u9fff]+|[A-Za-z0-9_]+")
 PRODUCT_ALIASES = {
     "人体工学椅手册": ("人体工学椅", "椅子", "扶手"),
@@ -268,6 +269,8 @@ def _load_embeddings() -> None:
     if _EMBED_LOADED:
         return
     _EMBED_LOADED = True
+    if not USE_VECTOR_RETRIEVAL:
+        return
     if not EMBEDDINGS_PATH.exists():
         return
     with EMBEDDINGS_PATH.open(encoding="utf-8") as f:
@@ -431,9 +434,11 @@ def _rerank(query: str, docs: list[Doc]) -> list[Doc]:
 
 
 def _retrieve(query: str, top_k: int = TOP_K) -> list[Doc]:
+    if not USE_VECTOR_RETRIEVAL:
+        return _lexical_retrieve(query, top_k)
     _load_embeddings()
     if not _EMBED_VECS:
-        return []
+        return _lexical_retrieve(query, top_k)
     query_variants = _split_retrieve_queries(query)
     q_vecs = _embed_texts(query_variants)
     if not q_vecs:
@@ -857,7 +862,8 @@ app = FastAPI(title="DF1165 Multimodal CS Agent", version="4.0.0")
 
 @app.on_event("startup")
 def _startup() -> None:
-    _load_embeddings()
+    if USE_VECTOR_RETRIEVAL:
+        _load_embeddings()
 
 
 @app.get("/health")
@@ -867,6 +873,8 @@ def health() -> dict:
         "provider": PROVIDER,
         "knowledge_docs": len(KNOWLEDGE),
         "embed_vecs": len(_EMBED_VECS),
+        "use_vector_retrieval": USE_VECTOR_RETRIEVAL,
+        "supports_embeddings": SUPPORTS_EMBEDDINGS,
         "chat_model": CHAT_MODEL,
         "vlm_model": VLM_MODEL,
         "embed_model": EMBED_MODEL,
