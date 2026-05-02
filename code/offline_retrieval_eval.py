@@ -99,6 +99,66 @@ CASES = [
         "must": ("餐具篮", "叉、勺", "视型号而定"),
         "doc_prefix": "洗碗机手册::s0038",
     },
+    {
+        "id": "watercraft_steering",
+        "question": "How the ship steers?",
+        "must": ("转向", "车把", "喷射推力喷嘴"),
+        "doc_prefix": "摩托艇手册::s0038",
+    },
+    {
+        "id": "jetski_start",
+        "question": "How to start my jetski in different situations?",
+        "must": ("启动发动机", "启动开关", "熄火绳"),
+        "doc_prefix": "摩托艇手册::s0017",
+    },
+    {
+        "id": "grill_safety_tips",
+        "question": "Can you share me some safety tips using the grill?",
+        "must": ("Safety Tips", "LP tank", "grease tray"),
+        "doc_prefix": "汇总英文手册::s1236",
+    },
+    {
+        "id": "function_keyboard_disclaimer",
+        "question": "功能键盘的保修政策中，损害赔偿的除外责任或免责声明通常是什么？",
+        "must": ("损害免责条款", "间接或继发性损害", "数据丢失"),
+        "doc_prefix": "功能键盘手册::s0028",
+    },
+    {
+        "id": "snowmobile_spark_plug",
+        "question": "What are the steps to inspect the spark plug on a snowmobile?",
+        "must": ("SPARK PLUG INSPECTION", "white porcelain insulator", "light tan color"),
+        "doc_prefix": "汇总英文手册::s1402",
+    },
+    {
+        "id": "lawn_mower_unload",
+        "question": "How can you unload a lawn mower?",
+        "must": ("Unloading the Machine", "ramp", "15 degrees"),
+        "doc_prefix": "汇总英文手册::s2587",
+    },
+    {
+        "id": "lawn_mower_engine_oil",
+        "question": "How can you change the engine oil of a lawn mower?",
+        "must": ("Changing the Engine Oil", "drains better", "Full mark"),
+        "doc_prefix": "汇总英文手册::s2608",
+    },
+    {
+        "id": "grill_leak_testing",
+        "question": "To engure my safety when using the grill, how to do leak testing on valves, hose and regulatol?",
+        "must": ("Leak Testing Valves", "Brush soapy solution", "growing"),
+        "doc_prefix": "汇总英文手册::s1234",
+    },
+    {
+        "id": "boat_factory_reset",
+        "question": "In the boat's steering position, what does the factory reset screen show?",
+        "must": ("Factory reset screen", "YES", "NO"),
+        "doc_prefix": "汇总英文手册::s0757",
+    },
+    {
+        "id": "boat_steering_check",
+        "question": "How do I check the boat's steering system when I'm driving it?",
+        "must": ("Steering system checks", "jet thrust nozzles", "starboard"),
+        "doc_prefix": "汇总英文手册::s0865",
+    },
 ]
 
 
