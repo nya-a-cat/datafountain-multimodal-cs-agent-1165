@@ -159,6 +159,30 @@ CASES = [
         "must": ("Steering system checks", "jet thrust nozzles", "starboard"),
         "doc_prefix": "汇总英文手册::s0865",
     },
+    {
+        "id": "function_keyboard_cam",
+        "question": "如何将功能键盘搭配CAM软件使用？",
+        "must": ("下载并安装CAM软件", "配置文件", "自定义RGB灯光"),
+        "doc_prefix": "功能键盘手册::p0013",
+    },
+    {
+        "id": "function_keyboard_hardware",
+        "question": "如何在硬件模式下使用功能键盘？",
+        "must": ("硬件模式", "FN", "F1"),
+        "doc_prefix": "功能键盘手册::p0021",
+    },
+    {
+        "id": "vr_safety",
+        "question": "使用和操作VR头显时应采取哪些安全预防措施，以确保用户安全和设备使用寿命？",
+        "must": ("VR头显", "健康", "安全"),
+        "doc_prefix": "VR头显手册::",
+    },
+    {
+        "id": "fax_safety",
+        "question": "What should I pay attention to in order to ensure my safety when using this fax?",
+        "must": ("Product Safety Guide", "warnings", "instructions"),
+        "doc_prefix": "汇总英文手册::s1111",
+    },
 ]
 
 
