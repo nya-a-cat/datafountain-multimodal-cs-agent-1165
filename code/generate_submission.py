@@ -45,6 +45,10 @@ BAD_ANSWER_MARKERS = (
     "current knowledge base",
     "I don't have specific",
     "please refer to the user manual",
+    "知识库未找到",
+    "我无法访问",
+    "没有直接",
+    "没有明确",
 )
 
 
@@ -226,6 +230,14 @@ def normalize_answer(text: str) -> str:
     return " ".join(text.replace("\r", " ").replace("\n", " ").split())
 
 
+def normalize_question(text: str) -> str:
+    text = text.replace("\r", "\n")
+    text = re.sub(r'"+\s*,\s*"+', " ", text)
+    text = text.replace('""', '"').replace("，\n", "\n")
+    text = text.replace('"', " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def call_chat_api(
     api_url: str,
     qid: str,
@@ -298,7 +310,7 @@ def read_questions(path: Path) -> list[tuple[str, str]]:
         reader = csv.DictReader(f)
         for row in reader:
             qid = str(row.get("id", "")).strip()
-            question = str(row.get("question", "")).strip()
+            question = normalize_question(str(row.get("question", "")))
             if not qid:
                 continue
             rows.append((qid, question))
@@ -346,6 +358,8 @@ def _process_one(
     image_ids = [image_id for image_id, _ in attachments]
     images = [image_b64 for _, image_b64 in attachments]
     answer = call_chat_api(args.api_url, qid, qtext, args.timeout, args.retries, image_ids, images)
+    if _is_bad_answer(answer):
+        answer = call_chat_api(args.api_url, qid, qtext, args.timeout, max(args.retries, 1), image_ids, images)
     return idx, qid, answer
 
 

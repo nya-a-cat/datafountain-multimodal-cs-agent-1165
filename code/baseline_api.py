@@ -95,6 +95,42 @@ PRODUCT_ALIASES = {
 }
 POLICY_KB = [
     (
+        ("智能客服", "解答不了", "人工客服", "转人工"),
+        "智能客服：您好，智能客服可以解答订单、物流、退换货、退款、发票、售后政策及商品说明书相关问题。若问题较复杂或智能客服无法解答，可为您转接人工客服或登记工单，由专员继续处理。",
+    ),
+    (
+        ("纸质版说明书", "电子版", "说明书"),
+        "说明书：您好，商品通常随包装提供纸质说明书；若纸质说明书遗失或未收到，也可以联系在线客服获取电子版说明书或对应商品的使用指引。",
+    ),
+    (
+        ("生产日期", "保质期", "临期", "过期", "受潮"),
+        "生产日期/保质期：您好，商品生产日期和保质期以商品外包装或标签标注为准。若收到临期、过期、包装破损或受潮商品，您可以提供订单号和商品照片，我们会优先为您核实并支持退货退款、换货或补偿处理。",
+    ),
+    (
+        ("上门安装", "安装服务", "安装人员", "配件费", "上门检修", "现场修复", "拉回仓库"),
+        "上门安装/检修：您好，是否支持上门安装或检修需根据商品类型、服务地区和订单服务内容确认。若页面承诺免费安装却被额外收费，或安装/检修过程造成商品损坏，您可以提供订单号、收费凭证和现场照片，我们会核实后为您处理退款、维修、换货或赔付。",
+    ),
+    (
+        ("售后维修", "维修服务", "人为损坏", "维修费用", "质保期", "免费维修", "配件费", "维修时间", "终身维修", "保障卡", "售后保障卡"),
+        "售后维修：您好，售后维修范围通常包含商品质量问题、功能故障及质保期内的非人为损坏问题。质保期内符合条件的一般可免费维修；人为损坏、进液、摔损或超出质保范围的情况可能需要付费维修，具体费用需检测后确认。保障卡遗失通常不影响售后，提供订单号即可核实购买记录。",
+    ),
+    (
+        ("以旧换新",),
+        "以旧换新：您好，是否支持以旧换新需以具体商品页面活动和平台规则为准。您可以提供想购买的商品型号及旧机情况，我帮您核实是否参与活动、抵扣方式和回收流程。",
+    ),
+    (
+        ("试用装", "试用商品", "试用期间", "延长试用"),
+        "试用服务：您好，是否提供试用装或试用服务需以具体商品页面活动为准。试用期间如出现非人为质量故障，可提供订单号和问题凭证，我们会核实后协助更换、维修或按活动规则处理；试用期限是否可延长需以活动规则为准。",
+    ),
+    (
+        ("优惠券",),
+        "优惠券：您好，优惠券是否适用于所有商品需以券面规则为准，通常会受商品范围、订单金额、使用期限及是否可叠加等条件限制。您可以查看优惠券详情页或提供券信息，我帮您核实可用范围。",
+    ),
+    (
+        ("快递丢失", "丢失", "不在家", "送达时", "待揽收", "揽收"),
+        "物流异常：您好，如物流显示待揽收，一般是商品已打包等待快递员取件，通常24小时内会完成揽收；如快递丢失、无法签收或送达时您不在家，请提供订单号和物流单号，我们会联系物流核实，确认责任后可为您安排补发、退款或赔付处理。",
+    ),
+    (
         ("国外", "国际", "海外", "境外", "寄到国外", "国际配送"),
         "国际配送：您好，部分商品支持国际配送，具体能否发往海外取决于商品类型、目的地国家/地区及物流限制。国际配送运费和时效会根据收货地址、商品重量体积及清关要求计算，您可以提供具体收货国家/地区和商品信息，我帮您进一步核实。",
     ),
@@ -111,6 +147,10 @@ POLICY_KB = [
         "7天无理由退换货：您好，支持7天无理由退换货。商品需保持完好、配件齐全且不影响二次销售；非质量问题通常由买家承担退回运费，质量问题由我们承担。您可提供订单号，我帮您核对可退换条件。",
     ),
     (
+        ("换货", "划痕", "瑕疵", "包装盒丢", "包装丢", "其他款式", "更大的尺寸", "尺寸差价", "颜色偏差", "颜色和详情页", "异味"),
+        "换货：您好，商品存在瑕疵、颜色/款式与描述不符或尺寸不合适时，可以申请售后换货。商品需尽量保持完整，包装盒遗失也可先提交申请，我们会结合商品状态核实；涉及更换更高价款式或更大尺寸的，差价通常需按页面实际价格补齐，质量问题产生的退回运费由我们承担。",
+    ),
+    (
         ("退款", "原路退回", "信用卡"),
         "退款：您好，退款一般会在审核通过后原路退回，到账时间通常为1-7个工作日，信用卡渠道可能略慢。若超时未到账，您把订单号发我，我马上帮您催办。",
     ),
@@ -119,7 +159,7 @@ POLICY_KB = [
         "发票：您好，支持开具发票，可开个人或企业抬头。订单完成后一般1-3个工作日内开具；若抬头填写有误，可在开票前联系修改。",
     ),
     (
-        ("投诉", "质量问题", "损坏", "破损", "少发", "补寄", "假货", "二手", "翻新", "虚假宣传", "赔偿", "功能不一致", "描述不一致"),
+        ("投诉", "质量问题", "损坏", "破损", "包装破损", "少发", "少了一件", "少件", "漏发", "补发", "补寄", "假货", "二手", "拆封", "污渍", "翻新", "虚假宣传", "赔偿", "功能不一致", "描述不一致", "客服没人管", "辱骂", "临期", "受潮"),
         "投诉/质量问题：您好，非常抱歉给您带来不好的体验！该问题可优先为您登记升级处理，支持核实后补发、换货、维修或退款。请您提供订单号及问题照片/视频证据，我会立即为您创建加急工单并持续跟进结果。",
     ),
     (
@@ -180,7 +220,7 @@ class ChatRequest(BaseModel):
 
     @property
     def user_query(self) -> str:
-        return (self.question or self.query or "").strip()
+        return _normalize_user_text(self.question or self.query or "")
 
 
 class ChatResponse(BaseModel):
@@ -194,6 +234,15 @@ class ChatResponse(BaseModel):
 def _extract_b64(image: str) -> str:
     s = image.strip()
     return s.split(",", 1)[1].strip() if s.startswith("data:") and "," in s else s
+
+
+def _normalize_user_text(text: str) -> str:
+    text = text.replace("\r", "\n")
+    text = re.sub(r'"+\s*,\s*"+', " ", text)
+    text = text.replace('""', '"').replace("，\n", "\n")
+    text = text.replace('"', " ")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 def _validate_b64_image(image: str) -> None:
@@ -374,8 +423,31 @@ def _doc_relevance(query: str, doc: Doc) -> float:
         score += 8.0
         if doc.image_refs:
             score += 8.0
+    for term in _query_cjk_terms(query):
+        if term in doc.title:
+            score += min(9.0, 2.0 + len(term))
+        elif term in doc.content:
+            score += min(5.0, 1.0 + 0.5 * len(term))
     wants_install = any(word in query_lower for word in ("install", "mount", "attach", "安装", "装入", "插入"))
     wants_remove = any(word in query_lower for word in ("remove", "detach", "拆卸", "取出", "移除"))
+    wants_start = any(word in query for word in ("启动", "冷机", "热机"))
+    wants_shutdown = any(word in query for word in ("关闭", "停机"))
+    wants_carburetor = "化油器" in query or "油针" in query or "怠速" in query
+    if wants_start and any(term in haystack for term in ("冷机启动", "热机启动", "启动与停机")):
+        score += 12.0
+    if wants_shutdown and any(term in haystack for term in ("停机", "关闭发动机", "停机开关")):
+        score += 10.0
+    if (wants_start or wants_shutdown) and any(term in title_lower for term in ("吸尘作业", "吹扫作业", "安装集尘袋")):
+        score -= 8.0
+    if wants_carburetor:
+        if any(term in haystack for term in ("化油器调节", "低速油针", "高速油针", "调节操作")):
+            score += 12.0
+        if any(term in doc.title for term in ("化油器", "低速油针", "高速油针", "基础（出厂）设置")):
+            score += 8.0
+        if any(term in doc.title for term in ("吹风机部件", "火花塞", "空气滤清器", "每周维护", "每月维护")):
+            score -= 14.0
+    if wants_shutdown and doc.chunk_type == "procedure" and (len(doc.content) > 300 or doc.content.count("#") > 2):
+        score -= 20.0
     if wants_install and doc.chunk_type == "procedure":
         score += 6.0
     if wants_install and any(word in title_lower for word in ("install", "mount", "attach", "insert", "安装", "插入")):
@@ -406,8 +478,24 @@ def _query_identifiers(query: str) -> list[str]:
     return [item.upper() for item in re.findall(r"[A-Za-z]{2,}\d+[A-Za-z0-9-]*", query)]
 
 
+def _query_cjk_terms(query: str) -> list[str]:
+    terms: list[str] = []
+    for chunk in re.findall(r"[\u4e00-\u9fff]{2,}", query):
+        if len(chunk) >= 3:
+            terms.append(chunk)
+        terms.extend(chunk[i:i + 2] for i in range(len(chunk) - 1))
+    important = (
+        "化油器", "低速油针", "高速油针", "怠速", "冷机", "热机", "启动", "停机",
+        "关闭", "阻风门", "泵油", "防护装备", "安全要点", "指示灯", "安装",
+        "拆卸", "遥控器", "电池", "支架",
+    )
+    terms.extend(term for term in important if term in query)
+    weak = {"如何", "怎么", "使用", "该如", "时该", "需要", "哪些", "什么"}
+    return [term for term in dict.fromkeys(terms) if term not in weak]
+
+
 def _match_policy_evidence(query: str) -> list[str]:
-    scored: list[tuple[int, int, str]] = []
+    scored: list[tuple[int, int, int, str]] = []
     for keywords, text in POLICY_KB:
         hits = [keyword for keyword in keywords if keyword in query]
         if not hits:
@@ -416,17 +504,37 @@ def _match_policy_evidence(query: str) -> list[str]:
         priority = {
             "投诉/质量问题": 8,
             "维修失误": 7,
+            "上门安装/检修": 7,
+            "生产日期/保质期": 7,
+            "售后维修": 6,
             "国际配送": 6,
+            "物流异常": 6,
+            "换货": 6,
             "退款": 5,
+            "说明书": 5,
             "7天无理由退换货": 4,
             "发票": 4,
+            "智能客服": 4,
+            "试用服务": 4,
+            "以旧换新": 4,
+            "优惠券": 4,
             "待揽收": 3,
             "乡镇配送": 1,
         }.get(label, 0)
         specificity = sum(len(keyword) for keyword in hits)
         scored.append((priority, len(hits), specificity, text))
     scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
-    return [scored[0][3]] if scored else []
+    selected: list[str] = []
+    seen_labels: set[str] = set()
+    for _priority, _hits, _specificity, text in scored:
+        label = text.split("：", 1)[0]
+        if label in seen_labels:
+            continue
+        selected.append(text)
+        seen_labels.add(label)
+        if len(selected) >= 3:
+            break
+    return selected
 
 
 def _detect_language(query: str) -> str:
@@ -451,7 +559,7 @@ def _classify_query(query: str, image_facts: list[str]) -> QueryPlan:
     needs_image = bool(image_facts) or _needs_image(query)
     if policy_evidence:
         kind = "policy"
-    elif any(word in query for word in ("投诉", "质量问题", "假货", "二手", "少发", "破损")):
+    elif any(word in query for word in ("投诉", "质量问题", "假货", "二手", "少发", "破损", "售后", "换货", "退款")):
         kind = "complaint"
     elif needs_image:
         kind = "visual_manual"
@@ -479,6 +587,7 @@ def _lexical_score_pairs(query: str) -> list[tuple[str, float]]:
     query_lower = query.lower()
     query_identifiers = _query_identifiers(query)
     query_phrases = _query_phrases(query)
+    query_cjk_terms = _query_cjk_terms(query)
     wants_image = _needs_image(query)
     wants_procedure = any(
         word in query_lower
@@ -489,6 +598,9 @@ def _lexical_score_pairs(query: str) -> list[tuple[str, float]]:
     )
     wants_install = any(word in query_lower for word in ("install", "mount", "attach", "安装", "装入", "插入"))
     wants_remove = any(word in query_lower for word in ("remove", "detach", "拆卸", "取出", "移除"))
+    wants_start = any(word in query for word in ("启动", "冷机", "热机"))
+    wants_shutdown = any(word in query for word in ("关闭", "停机"))
+    wants_carburetor = "化油器" in query or "油针" in query or "怠速" in query
     mentions_print = any(word in query_lower for word in ("print", "printer", "printing", "打印"))
     scored: list[tuple[float, Doc]] = []
     for doc in KNOWLEDGE:
@@ -515,11 +627,37 @@ def _lexical_score_pairs(query: str) -> list[tuple[str, float]]:
                 score += 8.0
             elif phrase in haystack:
                 score += 4.0
+        for term in query_cjk_terms:
+            if term in doc.title:
+                score += min(10.0, 2.5 + len(term))
+            elif term in doc.content:
+                score += min(6.0, 1.5 + 0.5 * len(term))
         for identifier in query_identifiers:
             if identifier in doc.title.upper():
                 score += 18.0
             elif identifier in doc.content.upper():
                 score += 10.0
+        if wants_start:
+            if any(term in haystack for term in ("冷机启动", "热机启动", "启动与停机")):
+                score += 14.0
+            if ("冷机" in query and "冷机启动" in haystack) or ("热机" in query and "热机启动" in haystack):
+                score += 10.0
+            if any(term in title_lower for term in ("吸尘作业", "吹扫作业", "安装集尘袋")) and not any(term in query for term in ("吸尘", "吹扫", "集尘")):
+                score -= 10.0
+        if wants_shutdown:
+            if any(term in haystack for term in ("停机", "关闭发动机", "停机开关")):
+                score += 12.0
+            if any(term in title_lower for term in ("吸尘作业", "吹扫作业", "安装集尘袋")):
+                score -= 10.0
+            if doc.chunk_type == "procedure" and (len(doc.content) > 300 or doc.content.count("#") > 2):
+                score -= 20.0
+        if wants_carburetor:
+            if any(term in haystack for term in ("化油器调节", "低速油针", "高速油针", "调节操作")):
+                score += 12.0
+            if any(term in doc.title for term in ("化油器", "低速油针", "高速油针", "基础（出厂）设置")):
+                score += 8.0
+            if any(term in doc.title for term in ("吹风机部件", "火花塞", "空气滤清器", "每周维护", "每月维护")):
+                score -= 14.0
         if wants_install and any(word in title_lower for word in ("install", "mount", "attach", "insert", "安装", "插入")):
             score += 12.0
         elif wants_install and any(word in haystack for word in ("install", "mount", "attach", "insert", "安装", "插入")):
@@ -599,7 +737,7 @@ def _neighbor_doc_ids(doc_id: str, radius: int = NEIGHBOR_RADIUS) -> list[str]:
     return neighbors
 
 
-def _forward_doc_ids(doc_id: str, count: int = 3) -> list[str]:
+def _forward_doc_ids(doc_id: str, count: int = 5) -> list[str]:
     if "::s" not in doc_id:
         return [doc_id]
     prefix, section = doc_id.rsplit("::s", 1)
@@ -626,7 +764,16 @@ def _select_evidence_docs(docs: list[Doc], query: str = "", max_docs: int = MAX_
         for neighbor_id in candidate_ids:
             if neighbor_id in seen:
                 continue
-            pool.append(_DOC_ID_MAP[neighbor_id])
+            candidate = _DOC_ID_MAP[neighbor_id]
+            if (
+                query
+                and any(word in query for word in ("关闭", "停机"))
+                and candidate.chunk_type == "procedure"
+                and (len(candidate.content) > 300 or candidate.content.count("#") > 2)
+            ):
+                seen.add(neighbor_id)
+                continue
+            pool.append(candidate)
             seen.add(neighbor_id)
     if query:
         pool.sort(
@@ -900,6 +1047,8 @@ def _sanitize_answer(text: str) -> str:
     answer = answer.replace("provided evidence", "manual").replace("available documentation", "manual")
     answer = answer.replace("```", "")
     answer = " ".join(answer.replace("\r", " ").replace("\n", " ").split())
+    answer = re.sub(r"(^|[：:；;。.!?？])\s*\d+[.、]\s*", r"\1", answer)
+    answer = re.sub(r"(^|\s)[\-*]\s+", r"\1", answer)
     for marker in ("最终答案：", "最终答案:", "Final answer:", "Answer:"):
         if marker in answer:
             answer = answer.rsplit(marker, 1)[1].strip()
@@ -927,10 +1076,14 @@ def _fallback_answer_from_evidence(evidence: list[str]) -> str:
 def _policy_answer_from_evidence(evidence: list[str]) -> str:
     if not evidence:
         return ""
-    text = evidence[0].strip()
-    if "：" in text:
-        return text.split("：", 1)[1].strip()
-    return text
+    answers: list[str] = []
+    for item in evidence[:3]:
+        text = item.strip()
+        if "：" in text:
+            text = text.split("：", 1)[1].strip()
+        if text and text not in answers:
+            answers.append(text)
+    return " ".join(answers)
 
 
 def _generate_answer(query: str, plan: QueryPlan, bundle: EvidenceBundle, image_facts: list[str],
@@ -976,6 +1129,8 @@ def _generate_answer(query: str, plan: QueryPlan, bundle: EvidenceBundle, image_
         "Do not say that information is unavailable, do not ask for model details, and do not tell the user to check a manual. "
         "Forbidden phrases include: provided evidence, available documentation, not described, refer to, I don't have specific information. "
         "Use only the supplied evidence/policy text; if exact details are thin, provide the closest concise answer supported by it. "
+        "For Chinese manual answers, extract the concrete operations or facts directly and keep the answer short. "
+        "For English manual answers, answer in one concise paragraph using only the evidence. "
         "Keep <PIC> placeholders from relevant evidence. Do not use Markdown or numbered lists."
     )
     model = VLM_MODEL if images_b64 and SUPPORTS_IMAGE_INPUTS else CHAT_MODEL

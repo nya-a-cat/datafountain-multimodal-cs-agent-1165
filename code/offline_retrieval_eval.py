@@ -63,6 +63,36 @@ CASES = [
         "must": ("7天无理由退换货", "非质量问题通常由买家承担", "质量问题由我们承担"),
         "doc_prefix": "",
     },
+    {
+        "id": "missing_item_policy",
+        "question": "我收到的商品少了一件，联系客服说会补发，但是过了一周还没补发！",
+        "must": ("补发", "换货", "维修或退款"),
+        "doc_prefix": "",
+    },
+    {
+        "id": "blower_carburetor",
+        "question": "使用吹风机时，如何调节化油器？",
+        "must": ("化油器", "低速油针", "高速油针"),
+        "doc_prefix": "吹风机手册::s",
+    },
+    {
+        "id": "blower_cold_start",
+        "question": "吹风机冷机时，该如何启动？",
+        "must": ("冷机启动", "阻风门", "泵油"),
+        "doc_prefix": "吹风机手册::s0034",
+    },
+    {
+        "id": "blower_hot_start",
+        "question": "吹风机热机时，该如何启动？",
+        "must": ("热机启动", "阻风门", "启动油门"),
+        "doc_prefix": "吹风机手册::s0034",
+    },
+    {
+        "id": "blower_stop",
+        "question": "该如何关闭吹风机？",
+        "must": ("停机", "停机开关", "关闭发动机"),
+        "doc_prefix": "吹风机手册::s0035",
+    },
 ]
 
 
