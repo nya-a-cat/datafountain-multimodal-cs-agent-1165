@@ -93,6 +93,12 @@ CASES = [
         "must": ("停机", "停机开关", "关闭发动机"),
         "doc_prefix": "吹风机手册::s0035",
     },
+    {
+        "id": "dishwasher_cutlery_basket",
+        "question": "如何根据洗碗机型号安装餐具篮？",
+        "must": ("餐具篮", "叉、勺", "视型号而定"),
+        "doc_prefix": "洗碗机手册::s0038",
+    },
 ]
 
 

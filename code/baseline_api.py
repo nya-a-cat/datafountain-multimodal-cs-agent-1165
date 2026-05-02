@@ -433,6 +433,7 @@ def _doc_relevance(query: str, doc: Doc) -> float:
     wants_start = any(word in query for word in ("启动", "冷机", "热机"))
     wants_shutdown = any(word in query for word in ("关闭", "停机"))
     wants_carburetor = "化油器" in query or "油针" in query or "怠速" in query
+    wants_dish_basket = any(word in query for word in ("餐具篮", "碗篮", "篮架", "装载"))
     if wants_start and any(term in haystack for term in ("冷机启动", "热机启动", "启动与停机")):
         score += 12.0
     if wants_shutdown and any(term in haystack for term in ("停机", "关闭发动机", "停机开关")):
@@ -445,6 +446,13 @@ def _doc_relevance(query: str, doc: Doc) -> float:
         if any(term in doc.title for term in ("化油器", "低速油针", "高速油针", "基础（出厂）设置")):
             score += 8.0
         if any(term in doc.title for term in ("吹风机部件", "火花塞", "空气滤清器", "每周维护", "每月维护")):
+            score -= 14.0
+    if wants_dish_basket:
+        if any(term in doc.title for term in ("餐具篮", "碗篮", "上层篮", "下层篮", "篮架")):
+            score += 16.0
+        elif any(term in haystack for term in ("餐具篮", "碗篮", "上层篮", "下层篮", "篮架", "餐具放入洗碗机")):
+            score += 8.0
+        if any(term in doc.title for term in ("概览", "程序选择", "故障排除", "餐具洗不干净", "进水管", "测试机构")):
             score -= 14.0
     if wants_shutdown and doc.chunk_type == "procedure" and (len(doc.content) > 300 or doc.content.count("#") > 2):
         score -= 20.0
@@ -487,7 +495,8 @@ def _query_cjk_terms(query: str) -> list[str]:
     important = (
         "化油器", "低速油针", "高速油针", "怠速", "冷机", "热机", "启动", "停机",
         "关闭", "阻风门", "泵油", "防护装备", "安全要点", "指示灯", "安装",
-        "拆卸", "遥控器", "电池", "支架",
+        "拆卸", "遥控器", "电池", "支架", "餐具篮", "碗篮", "上层篮",
+        "下层篮", "篮架", "装载",
     )
     terms.extend(term for term in important if term in query)
     weak = {"如何", "怎么", "使用", "该如", "时该", "需要", "哪些", "什么"}
@@ -601,6 +610,7 @@ def _lexical_score_pairs(query: str) -> list[tuple[str, float]]:
     wants_start = any(word in query for word in ("启动", "冷机", "热机"))
     wants_shutdown = any(word in query for word in ("关闭", "停机"))
     wants_carburetor = "化油器" in query or "油针" in query or "怠速" in query
+    wants_dish_basket = any(word in query for word in ("餐具篮", "碗篮", "篮架", "装载"))
     mentions_print = any(word in query_lower for word in ("print", "printer", "printing", "打印"))
     scored: list[tuple[float, Doc]] = []
     for doc in KNOWLEDGE:
@@ -657,6 +667,13 @@ def _lexical_score_pairs(query: str) -> list[tuple[str, float]]:
             if any(term in doc.title for term in ("化油器", "低速油针", "高速油针", "基础（出厂）设置")):
                 score += 8.0
             if any(term in doc.title for term in ("吹风机部件", "火花塞", "空气滤清器", "每周维护", "每月维护")):
+                score -= 14.0
+        if wants_dish_basket:
+            if any(term in doc.title for term in ("餐具篮", "碗篮", "上层篮", "下层篮", "篮架")):
+                score += 16.0
+            elif any(term in haystack for term in ("餐具篮", "碗篮", "上层篮", "下层篮", "篮架", "餐具放入洗碗机")):
+                score += 8.0
+            if any(term in doc.title for term in ("概览", "程序选择", "故障排除", "餐具洗不干净", "进水管", "测试机构")):
                 score -= 14.0
         if wants_install and any(word in title_lower for word in ("install", "mount", "attach", "insert", "安装", "插入")):
             score += 12.0
@@ -1013,6 +1030,10 @@ _ANSWER_LEAK_PATTERNS = (
     "知识库未找到",
     "没有直接",
     "没有明确",
+    "请参考",
+    "查看手册",
+    "查阅手册",
+    "参考手册",
     "I don't have specific",
     "please refer to the user manual",
 )
@@ -1128,6 +1149,7 @@ def _generate_answer(query: str, plan: QueryPlan, bundle: EvidenceBundle, image_
         "Never include reasoning, analysis, rules, evidence labels, knowledge-base discussion, or self-correction. "
         "Do not say that information is unavailable, do not ask for model details, and do not tell the user to check a manual. "
         "Forbidden phrases include: provided evidence, available documentation, not described, refer to, I don't have specific information. "
+        "Also forbidden in Chinese: 请参考手册, 查看手册, 查阅手册, 根据证据, 知识库显示. "
         "Use only the supplied evidence/policy text; if exact details are thin, provide the closest concise answer supported by it. "
         "For Chinese manual answers, extract the concrete operations or facts directly and keep the answer short. "
         "For English manual answers, answer in one concise paragraph using only the evidence. "
