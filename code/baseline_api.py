@@ -2,19 +2,20 @@
 """Multimodal customer service agent for DataFountain 1165.
 
 Pipeline:
-  1) If images present → VLM analysis
-  2) Vector retrieval (Qwen3-VL-Embedding-8B) from knowledge base
+  1) If images present -> VLM analysis
+  2) Lexical/BM25 retrieval from knowledge base
   3) LLM answer generation with evidence + image facts
 """
 
 from __future__ import annotations
 
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass
 import base64
 import binascii
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -30,9 +31,7 @@ from pydantic import BaseModel, Field, model_validator
 # ─── Config ──────────────────────────────────────────────────────────────────
 
 ROOT = Path(__file__).resolve().parents[1]
-_CHUNK_MODE = os.getenv("CHUNK_MODE", "small")  # "small" or "large"
-KNOWLEDGE_PATH = ROOT / "data" / ("knowledge_large.jsonl" if _CHUNK_MODE == "large" else "knowledge_v2.jsonl")
-EMBEDDINGS_PATH = ROOT / "data" / ("embeddings_large.jsonl" if _CHUNK_MODE == "large" else "embeddings.jsonl")
+KNOWLEDGE_PATH = ROOT / "data" / "knowledge_v2.jsonl"
 
 # Provider: "siliconflow" (default), "bailian" (Alibaba Cloud), or "deepseek"
 PROVIDER = os.getenv("PROVIDER", "siliconflow")
@@ -42,22 +41,16 @@ _PROVIDER_DEFAULTS = {
         "api_base": "https://api.siliconflow.cn/v1",
         "chat_model": "zai-org/GLM-4.5V",
         "vlm_model": "zai-org/GLM-4.5V",
-        "embed_model": "Qwen/Qwen3-VL-Embedding-8B",
-        "rerank_model": "Qwen/Qwen3-VL-Reranker-8B",
     },
     "bailian": {
         "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "chat_model": "qwen3.6-plus-2026-04-02",
         "vlm_model": "qwen3.6-plus-2026-04-02",
-        "embed_model": "qwen3-vl-embedding",
-        "rerank_model": "qwen3-vl-rerank",
     },
     "deepseek": {
         "api_base": "https://api.deepseek.com",
         "chat_model": "deepseek-v4-flash",
         "vlm_model": "deepseek-v4-flash",
-        "embed_model": "Qwen/Qwen3-VL-Embedding-8B",
-        "rerank_model": "Qwen/Qwen3-VL-Reranker-8B",
     },
 }
 
@@ -69,40 +62,42 @@ API_KEY = os.getenv(
 )
 CHAT_MODEL = os.getenv("CHAT_MODEL", _defaults["chat_model"])
 VLM_MODEL = os.getenv("VLM_MODEL", _defaults["vlm_model"])
-EMBED_MODEL = os.getenv("EMBED_MODEL", _defaults["embed_model"])
-RERANK_MODEL = os.getenv("RERANK_MODEL", _defaults["rerank_model"])
-_EMBED_DEFAULT_BASE = _PROVIDER_DEFAULTS["siliconflow"]["api_base"] if PROVIDER == "deepseek" and os.getenv("SILICONFLOW_API_KEY") else API_BASE
-_EMBED_DEFAULT_KEY = os.getenv("SILICONFLOW_API_KEY", "") if PROVIDER == "deepseek" and os.getenv("SILICONFLOW_API_KEY") else API_KEY
-EMBED_API_BASE = os.getenv("EMBED_OPENAI_BASE_URL", os.getenv("EMBED_API_BASE", _EMBED_DEFAULT_BASE))
-EMBED_API_KEY = os.getenv("EMBED_OPENAI_API_KEY", os.getenv("EMBED_API_KEY", _EMBED_DEFAULT_KEY))
-USE_RERANKER = False
-RERANK_TOP_N = 50
 KAFU_API_TOKEN = os.getenv("KAFU_API_TOKEN", "")
 
 MAX_IMAGES = 3
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 SESSION_MAX_TURNS = 6
 TOP_K = 8
-SOURCE_DOCS_FOR_EXPANSION = 3
-NEIGHBOR_RADIUS = 1
-MAX_EVIDENCE_DOCS = 5
-PARENT_TOP_N = 5
-PARENT_SCORE_LIMIT = 120
-TITLE_RERANK_TOP_N = 24
-TITLE_SCORE_WEIGHT = 0.25
-LOCAL_SUPPORT_WEIGHT = 0.05
+SOURCE_DOCS_FOR_EXPANSION = 4
+NEIGHBOR_RADIUS = 2
+MAX_EVIDENCE_DOCS = 7
 API_REQUEST_TIMEOUT = 60
 API_MAX_ATTEMPTS = 2
 SUPPORTS_IMAGE_INPUTS = PROVIDER in {"siliconflow", "bailian"}
-SUPPORTS_EMBEDDINGS = not (PROVIDER == "deepseek" and EMBED_API_BASE.rstrip("/") == API_BASE.rstrip("/"))
-USE_VECTOR_RETRIEVAL = os.getenv("USE_VECTOR_RETRIEVAL", "1" if SUPPORTS_EMBEDDINGS else "0") == "1"
+USE_QUERY_REWRITE = os.getenv("USE_QUERY_REWRITE", "0") == "1"
+RAG_TRACE_PATH = os.getenv("RAG_TRACE_PATH", "")
 WORD_RE = re.compile(r"[\u4e00-\u9fff]+|[A-Za-z0-9_]+")
+EN_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "before", "by", "can", "do", "does",
+    "for", "from", "have", "how", "i", "if", "in", "into", "is", "it", "of", "on",
+    "or", "the", "to", "use", "using", "we", "what", "when", "where", "with", "you",
+    "your",
+}
 PRODUCT_ALIASES = {
     "人体工学椅手册": ("人体工学椅", "椅子", "扶手"),
     "可编程温控器手册": ("可编程温控器", "温控器"),
     "VR头显手册": ("VR头显", "处理器单元", "遮光罩"),
+    "汇总英文手册": (
+        "camera", "cf card", "lens", "battery", "boat", "motherboard",
+        "grill", "microwave", "toothbrush", "washing machine",
+    ),
+    "相机手册": ("相机", "拍立得", "camera", "film", "lens"),
 }
 POLICY_KB = [
+    (
+        ("国外", "国际", "海外", "境外", "寄到国外", "国际配送"),
+        "国际配送：您好，部分商品支持国际配送，具体能否发往海外取决于商品类型、目的地国家/地区及物流限制。国际配送运费和时效会根据收货地址、商品重量体积及清关要求计算，您可以提供具体收货国家/地区和商品信息，我帮您进一步核实。",
+    ),
     (
         ("乡镇", "农村", "村镇", "运费", "多久能到", "配送"),
         "乡镇配送：您好，我们的商品支持送到大部分乡镇哦，具体能否送达，取决于您的收货地址，您可以告诉我详细的收货地址，我帮您查询。送到乡镇一般不需要额外加运费，和市区运费一致；物流时效会比市区稍慢，正常情况下，下单后48小时发货，乡镇地区3-5天可收到，偏远乡镇可能需要5-7天哦。",
@@ -124,7 +119,7 @@ POLICY_KB = [
         "发票：您好，支持开具发票，可开个人或企业抬头。订单完成后一般1-3个工作日内开具；若抬头填写有误，可在开票前联系修改。",
     ),
     (
-        ("投诉", "质量问题", "损坏", "破损", "少发", "假货", "二手", "虚假宣传"),
+        ("投诉", "质量问题", "损坏", "破损", "少发", "补寄", "假货", "二手", "翻新", "虚假宣传", "赔偿", "功能不一致", "描述不一致"),
         "投诉/质量问题：您好，非常抱歉给您带来不好的体验！该问题可优先为您登记升级处理，支持核实后补发、换货、维修或退款。请您提供订单号及问题照片/视频证据，我会立即为您创建加急工单并持续跟进结果。",
     ),
     (
@@ -142,6 +137,25 @@ class Doc:
     title: str
     content: str
     image_refs: list[str]
+    chunk_type: str = "atomic"
+    source_sections: list[str] | None = None
+
+
+@dataclass
+class QueryPlan:
+    kind: str
+    language: str
+    retrieval_query: str
+    needs_image: bool
+    policy_evidence: list[str]
+
+
+@dataclass
+class EvidenceBundle:
+    docs: list[Doc]
+    evidence: list[str]
+    compressed: str
+    image_ids: list[str]
 
 
 class ChatRequest(BaseModel):
@@ -230,7 +244,7 @@ def _call_api(model: str, messages: list[dict], max_tokens: int = 600,
     raise RuntimeError("API request failed after retries")
 
 
-# ─── Knowledge Base & Vector Retrieval ───────────────────────────────────────
+# ─── Knowledge Base & Lexical Retrieval ──────────────────────────────────────
 
 def _load_knowledge(path: Path) -> list[Doc]:
     if not path.exists():
@@ -247,6 +261,8 @@ def _load_knowledge(path: Path) -> list[Doc]:
                 title=_clean_knowledge_text(str(obj.get("title", ""))),
                 content=_clean_knowledge_text(str(obj.get("content", ""))),
                 image_refs=[str(x) for x in obj.get("image_refs", [])],
+                chunk_type=str(obj.get("chunk_type", "atomic")),
+                source_sections=[str(x) for x in obj.get("source_sections", [])] or None,
             ))
     return docs
 
@@ -260,54 +276,11 @@ def _clean_knowledge_text(text: str) -> str:
 KNOWLEDGE = _load_knowledge(KNOWLEDGE_PATH)
 _DOC_ID_MAP: dict[str, Doc] = {d.doc_id: d for d in KNOWLEDGE}
 
-_EMBED_VECS: dict[str, list[float]] = {}
-_TITLE_VECS: dict[str, list[float]] = {}
 _DOC_TOKEN_CACHE: dict[str, tuple[set[str], list[str]]] = {}
-_EMBED_LOADED = False
-
-
-def _load_embeddings() -> None:
-    global _EMBED_LOADED
-    if _EMBED_LOADED:
-        return
-    _EMBED_LOADED = True
-    if not USE_VECTOR_RETRIEVAL:
-        return
-    if not EMBEDDINGS_PATH.exists():
-        return
-    with EMBEDDINGS_PATH.open(encoding="utf-8") as f:
-        for line in f:
-            obj = json.loads(line)
-            _EMBED_VECS[obj["doc_id"]] = obj["embedding"]
-
-
-def _embed_query(text: str) -> list[float] | None:
-    if not EMBED_API_KEY or not SUPPORTS_EMBEDDINGS:
-        return None
-    vecs = _embed_texts([text])
-    return vecs[0] if vecs else None
-
-
-def _embed_texts(texts: list[str]) -> list[list[float]] | None:
-    if not EMBED_API_KEY or not texts or not SUPPORTS_EMBEDDINGS:
-        return None
-    payload = {"model": EMBED_MODEL, "input": texts, "encoding_format": "float"}
-    req = urllib.request.Request(
-        f"{EMBED_API_BASE.rstrip('/')}/embeddings",
-        data=json.dumps(payload, ensure_ascii=False).encode(),
-        headers={"Authorization": f"Bearer {EMBED_API_KEY}", "Content-Type": "application/json"},
-        method="POST",
-    )
-    for attempt in range(3):
-        try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                data = json.loads(r.read())["data"]
-            ordered = sorted(data, key=lambda x: x["index"])
-            return [item["embedding"] for item in ordered]
-        except Exception:
-            if attempt == 2:
-                return None
-            time.sleep(1)
+_DOC_BM25_CACHE: dict[str, tuple[Counter[str], Counter[str], int]] = {}
+_DOC_FREQ: Counter[str] = Counter()
+_AVG_DOC_LEN = 1.0
+_BM25_READY = False
 
 
 def _tokenize(text: str) -> list[str]:
@@ -317,9 +290,34 @@ def _tokenize(text: str) -> list[str]:
             tokens.append(chunk)
             if len(chunk) > 2:
                 tokens.extend(chunk[i:i + 2] for i in range(len(chunk) - 1))
-        elif len(chunk) >= 2:
+        elif len(chunk) >= 2 and chunk not in EN_STOPWORDS:
             tokens.append(chunk)
     return tokens
+
+
+def _build_bm25_index() -> None:
+    global _AVG_DOC_LEN, _BM25_READY
+    if _BM25_READY:
+        return
+    _BM25_READY = True
+    total_len = 0
+    for doc in KNOWLEDGE:
+        title_counts = Counter(_tokenize(doc.title))
+        body_counts = Counter(_tokenize(doc.content))
+        doc_len = sum(body_counts.values()) + int(2.0 * sum(title_counts.values()))
+        _DOC_BM25_CACHE[doc.doc_id] = (body_counts, title_counts, max(1, doc_len))
+        total_len += max(1, doc_len)
+        _DOC_FREQ.update(set(body_counts) | set(title_counts))
+    _AVG_DOC_LEN = total_len / max(1, len(KNOWLEDGE))
+
+
+def _query_phrases(query: str) -> list[str]:
+    phrases: list[str] = []
+    words = [word for word in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", query.lower()) if word not in EN_STOPWORDS]
+    for size in (4, 3, 2):
+        for idx in range(0, max(0, len(words) - size + 1)):
+            phrases.append(" ".join(words[idx:idx + size]))
+    return list(dict.fromkeys(phrases))
 
 
 def _lexical_retrieve(query: str, top_k: int = TOP_K) -> list[Doc]:
@@ -327,10 +325,33 @@ def _lexical_retrieve(query: str, top_k: int = TOP_K) -> list[Doc]:
     return [_DOC_ID_MAP[doc_id] for doc_id, _ in scored[:top_k] if doc_id in _DOC_ID_MAP]
 
 
+def _bm25_score(query_terms: Counter[str], doc: Doc) -> float:
+    _build_bm25_index()
+    body_counts, title_counts, doc_len = _DOC_BM25_CACHE.get(doc.doc_id, (Counter(), Counter(), 1))
+    if not query_terms:
+        return 0.0
+    k1 = 1.35
+    b = 0.72
+    total_docs = max(1, len(KNOWLEDGE))
+    score = 0.0
+    for term, qtf in query_terms.items():
+        tf = body_counts.get(term, 0) + 2.4 * title_counts.get(term, 0)
+        if tf <= 0:
+            continue
+        df = _DOC_FREQ.get(term, 0)
+        idf = math.log(1.0 + (total_docs - df + 0.5) / (df + 0.5))
+        denom = tf + k1 * (1.0 - b + b * doc_len / _AVG_DOC_LEN)
+        score += idf * (tf * (k1 + 1.0) / denom) * min(2.0, 1.0 + 0.2 * qtf)
+    return score
+
+
 def _doc_relevance(query: str, doc: Doc) -> float:
     q_tokens = set(_tokenize(query))
     if not q_tokens:
         return 0.0
+    query_lower = query.lower()
+    title_lower = doc.title.lower()
+    haystack = f"{doc.title} {doc.content}".lower()
     if doc.doc_id not in _DOC_TOKEN_CACHE:
         _DOC_TOKEN_CACHE[doc.doc_id] = (set(_tokenize(f"{doc.title} {doc.content}")), _tokenize(doc.title))
     doc_set, title_tokens = _DOC_TOKEN_CACHE[doc.doc_id]
@@ -338,6 +359,12 @@ def _doc_relevance(query: str, doc: Doc) -> float:
     overlap = q_tokens & doc_set
     title_overlap = q_tokens & title_token_set
     score = len(overlap) + 2.5 * len(title_overlap)
+    if _is_heading_only_doc(doc):
+        score -= 4.0
+    if _looks_like_leaked_image_list(doc):
+        score -= 6.0
+    if len(doc.content) > 80:
+        score += 1.0
     if doc.image_refs and "<PIC>" in doc.content:
         score += 3.0
     if doc.image_refs and any(word in query for word in ("图", "图片", "指示灯", "标识", "尺寸", "如下")):
@@ -347,7 +374,32 @@ def _doc_relevance(query: str, doc: Doc) -> float:
         score += 8.0
         if doc.image_refs:
             score += 8.0
+    wants_install = any(word in query_lower for word in ("install", "mount", "attach", "安装", "装入", "插入"))
+    wants_remove = any(word in query_lower for word in ("remove", "detach", "拆卸", "取出", "移除"))
+    if wants_install and doc.chunk_type == "procedure":
+        score += 6.0
+    if wants_install and any(word in title_lower for word in ("install", "mount", "attach", "insert", "安装", "插入")):
+        score += 8.0
+    elif wants_install and any(word in haystack for word in ("install", "mount", "attach", "insert", "安装", "插入")):
+        score += 3.0
+    if wants_install and not wants_remove and any(word in title_lower for word in ("detach", "remove", "removing", "拆卸", "取出")):
+        score -= 10.0
+    if wants_remove and any(word in title_lower for word in ("detach", "remove", "removing", "拆卸", "取出")):
+        score += 6.0
     return score
+
+
+def _is_heading_only_doc(doc: Doc) -> bool:
+    content = doc.content.strip()
+    if not content:
+        return True
+    body = content.lstrip("# ").strip()
+    return len(body) < 45 and "\n" not in body and "<PIC>" not in body
+
+
+def _looks_like_leaked_image_list(doc: Doc) -> bool:
+    text = f"{doc.title}\n{doc.content}"
+    return bool(re.search(r'"\s*,\s*\["[A-Za-z0-9_]+', text))
 
 
 def _query_identifiers(query: str) -> list[str]:
@@ -355,18 +407,89 @@ def _query_identifiers(query: str) -> list[str]:
 
 
 def _match_policy_evidence(query: str) -> list[str]:
-    hits: list[str] = []
+    scored: list[tuple[int, int, str]] = []
     for keywords, text in POLICY_KB:
-        if any(keyword in query for keyword in keywords):
-            hits.append(text)
-    return hits
+        hits = [keyword for keyword in keywords if keyword in query]
+        if not hits:
+            continue
+        label = text.split("：", 1)[0]
+        priority = {
+            "投诉/质量问题": 8,
+            "维修失误": 7,
+            "国际配送": 6,
+            "退款": 5,
+            "7天无理由退换货": 4,
+            "发票": 4,
+            "待揽收": 3,
+            "乡镇配送": 1,
+        }.get(label, 0)
+        specificity = sum(len(keyword) for keyword in hits)
+        scored.append((priority, len(hits), specificity, text))
+    scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    return [scored[0][3]] if scored else []
+
+
+def _detect_language(query: str) -> str:
+    has_zh = any('一' <= c <= '鿿' for c in query)
+    has_en = any(ord(c) < 128 and c.isalpha() for c in query)
+    return "zh" if has_zh or not has_en else "en"
+
+
+def _needs_image(query: str) -> bool:
+    q = query.lower()
+    image_words = (
+        "图", "图片", "照片", "示意图", "如下所示", "指示灯", "标识", "尺寸",
+        " image", " photo ", " picture", "indicator", "diagram", "shown",
+    )
+    return any(word in q for word in image_words)
+
+
+def _classify_query(query: str, image_facts: list[str]) -> QueryPlan:
+    policy_evidence = _match_policy_evidence(query)
+    q = query.lower()
+    language = _detect_language(query)
+    needs_image = bool(image_facts) or _needs_image(query)
+    if policy_evidence:
+        kind = "policy"
+    elif any(word in query for word in ("投诉", "质量问题", "假货", "二手", "少发", "破损")):
+        kind = "complaint"
+    elif needs_image:
+        kind = "visual_manual"
+    elif language == "en" and any(word in q for word in ("how", "steps", "install", "mount", "connect", "use", "set", "remove", "replace")):
+        kind = "procedure"
+    elif any(word in query for word in ("怎么", "如何", "步骤", "安装", "连接", "设置", "使用", "更换", "拆卸", "打开", "关闭")):
+        kind = "procedure"
+    elif any(word in query for word in ("多少", "尺寸", "参数", "含义", "状态", "指示灯", "型号")) or any(word in q for word in ("what are", "meaning", "spec", "size", "status")):
+        kind = "fact"
+    else:
+        kind = "manual"
+    return QueryPlan(
+        kind=kind,
+        language=language,
+        retrieval_query=query,
+        needs_image=needs_image,
+        policy_evidence=policy_evidence,
+    )
 
 
 def _lexical_score_pairs(query: str) -> list[tuple[str, float]]:
-    q_tokens = set(_tokenize(query))
-    if not q_tokens:
+    query_terms = Counter(_tokenize(query))
+    if not query_terms:
         return []
     query_lower = query.lower()
+    query_identifiers = _query_identifiers(query)
+    query_phrases = _query_phrases(query)
+    wants_image = _needs_image(query)
+    wants_procedure = any(
+        word in query_lower
+        for word in (
+            "how", "step", "install", "mount", "connect", "remove", "replace",
+            "怎么", "如何", "步骤", "安装", "连接", "拆卸", "更换", "打开", "关闭",
+        )
+    )
+    wants_install = any(word in query_lower for word in ("install", "mount", "attach", "安装", "装入", "插入"))
+    wants_remove = any(word in query_lower for word in ("remove", "detach", "拆卸", "取出", "移除"))
+    mentions_print = any(word in query_lower for word in ("print", "printer", "printing", "打印"))
     scored: list[tuple[float, Doc]] = []
     for doc in KNOWLEDGE:
         if doc.doc_id not in _DOC_TOKEN_CACHE:
@@ -374,17 +497,51 @@ def _lexical_score_pairs(query: str) -> list[tuple[str, float]]:
         doc_set, title_tokens = _DOC_TOKEN_CACHE[doc.doc_id]
         if not doc_set:
             continue
-        overlap = q_tokens & doc_set
-        if not overlap:
+        overlap = set(query_terms) & doc_set
+        score = _bm25_score(query_terms, doc)
+        if not overlap and score <= 0:
             continue
         title_token_set = set(title_tokens)
-        score = sum(2.0 if token in title_token_set else 1.0 for token in overlap)
-        score += len(overlap) / (len(doc_set) ** 0.5)
+        score += sum(1.2 if token in title_token_set else 0.35 for token in overlap)
         parent = _parent_key(doc.doc_id)
         parent_name = parent.replace("手册", "").lower()
         aliases = PRODUCT_ALIASES.get(parent, ())
         if (parent_name and parent_name in query_lower) or any(alias.lower() in query_lower for alias in aliases):
             score += 20.0
+        haystack = f"{doc.title} {doc.content}".lower()
+        title_lower = doc.title.lower()
+        for phrase in query_phrases:
+            if phrase in title_lower:
+                score += 8.0
+            elif phrase in haystack:
+                score += 4.0
+        for identifier in query_identifiers:
+            if identifier in doc.title.upper():
+                score += 18.0
+            elif identifier in doc.content.upper():
+                score += 10.0
+        if wants_install and any(word in title_lower for word in ("install", "mount", "attach", "insert", "安装", "插入")):
+            score += 12.0
+        elif wants_install and any(word in haystack for word in ("install", "mount", "attach", "insert", "安装", "插入")):
+            score += 5.0
+        if wants_install and not wants_remove and any(word in title_lower for word in ("detach", "remove", "removing", "拆卸", "取出")):
+            score -= 10.0
+        if wants_remove and any(word in title_lower for word in ("detach", "remove", "removing", "拆卸", "取出")):
+            score += 8.0
+        if not mentions_print and any(word in title_lower for word in ("print", "printing", "printer", "dpof")):
+            score -= 8.0
+        if wants_procedure and doc.chunk_type == "procedure":
+            score += 8.0
+        if wants_procedure and _is_heading_only_doc(doc):
+            score -= 4.0
+        if wants_image and doc.image_refs:
+            score += 7.0
+        if wants_image and "<PIC>" in doc.content:
+            score += 3.0
+        if _looks_like_leaked_image_list(doc):
+            score -= 12.0
+        if score <= 0:
+            continue
         scored.append((score, doc))
     scored.sort(key=lambda item: item[0], reverse=True)
     if not scored:
@@ -393,162 +550,12 @@ def _lexical_score_pairs(query: str) -> list[tuple[str, float]]:
     return [(doc.doc_id, score / max_score) for score, doc in scored]
 
 
-def _cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = sum(x * x for x in a) ** 0.5
-    nb = sum(x * x for x in b) ** 0.5
-    return dot / (na * nb + 1e-9)
-
-
-def _mean_vec(vecs: list[list[float]]) -> list[float]:
-    if not vecs:
-        return []
-    dims = len(vecs[0])
-    merged = [0.0] * dims
-    for vec in vecs:
-        for idx, value in enumerate(vec):
-            merged[idx] += value
-    return [value / len(vecs) for value in merged]
-
-
-def _rerank(query: str, docs: list[Doc]) -> list[Doc]:
-    if not docs or not API_KEY:
-        return docs
-    payload = {
-        "model": RERANK_MODEL,
-        "query": query,
-        "documents": [d.content for d in docs],
-        "top_n": len(docs),
-    }
-    req = urllib.request.Request(
-        f"{API_BASE.rstrip('/')}/rerank",
-        data=json.dumps(payload, ensure_ascii=False).encode(),
-        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=20) as r:
-            data = json.loads(r.read())
-        ranked = sorted(data["results"], key=lambda x: x["relevance_score"], reverse=True)
-        return [docs[item["index"]] for item in ranked]
-    except Exception:
-        return docs
-
-
 def _retrieve(query: str, top_k: int = TOP_K) -> list[Doc]:
-    if not USE_VECTOR_RETRIEVAL:
-        return _lexical_retrieve(query, top_k)
-    _load_embeddings()
-    if not _EMBED_VECS:
-        return _lexical_retrieve(query, top_k)
-    query_variants = _split_retrieve_queries(query)
-    q_vecs = _embed_texts(query_variants)
-    if not q_vecs:
-        return _lexical_retrieve(query, top_k)
-    q_vec = _mean_vec(q_vecs)
-    vector_scored = sorted(
-        (
-            (doc_id, max(_cosine(qv, vec) for qv in q_vecs))
-            for doc_id, vec in _EMBED_VECS.items()
-        ),
-        key=lambda x: x[1], reverse=True,
-    )
-    lexical_scores = dict(_lexical_score_pairs(query))
-    if lexical_scores:
-        scored = sorted(
-            (
-                (doc_id, score + 0.18 * lexical_scores.get(doc_id, 0.0))
-                for doc_id, score in vector_scored
-            ),
-            key=lambda x: x[1],
-            reverse=True,
-        )
-    else:
-        scored = vector_scored
-    if _CHUNK_MODE == "small":
-        filtered_pairs = _filter_scored_pairs_by_parent(scored)
-        candidates = [_DOC_ID_MAP[doc_id] for doc_id, _ in filtered_pairs if doc_id in _DOC_ID_MAP]
-        candidates = _rerank_with_titles(q_vec, candidates, filtered_pairs)
-    else:
-        candidates = [_DOC_ID_MAP[doc_id] for doc_id, _ in scored[:RERANK_TOP_N] if doc_id in _DOC_ID_MAP]
-    if USE_RERANKER:
-        candidates = _rerank(query, candidates)
-    return candidates[:top_k]
+    return _lexical_retrieve(query, top_k)
 
 
 def _parent_key(doc_id: str) -> str:
-    return doc_id.split("::s", 1)[0]
-
-
-def _rank_parents(scored_pairs: list[tuple[str, float]]) -> list[tuple[str, float]]:
-    grouped: dict[str, list[float]] = {}
-    for doc_id, score in scored_pairs[:PARENT_SCORE_LIMIT]:
-        grouped.setdefault(_parent_key(doc_id), []).append(score)
-
-    ranked: list[tuple[str, float]] = []
-    weights = (1.0, 0.18, 0.06, 0.02)
-    for parent, scores in grouped.items():
-        scores.sort(reverse=True)
-        agg = sum(score * weights[idx] for idx, score in enumerate(scores[:len(weights)]))
-        ranked.append((parent, agg))
-    ranked.sort(key=lambda item: item[1], reverse=True)
-    return ranked
-
-
-def _filter_scored_pairs_by_parent(scored_pairs: list[tuple[str, float]]) -> list[tuple[str, float]]:
-    ranked_parents = _rank_parents(scored_pairs)
-    allowed_parents = {parent for parent, _ in ranked_parents[:PARENT_TOP_N]}
-    filtered = [
-        (doc_id, score)
-        for doc_id, score in scored_pairs[:RERANK_TOP_N]
-        if _parent_key(doc_id) in allowed_parents
-    ]
-    return filtered or scored_pairs[:RERANK_TOP_N]
-
-
-def _ensure_title_vectors(docs: list[Doc]) -> None:
-    missing_docs = [doc for doc in docs if doc.doc_id not in _TITLE_VECS]
-    if not missing_docs:
-        return
-    batch_size = 32
-    for start in range(0, len(missing_docs), batch_size):
-        batch = missing_docs[start:start + batch_size]
-        vecs = _embed_texts([doc.title for doc in batch])
-        if not vecs:
-            return
-        for doc, vec in zip(batch, vecs):
-            _TITLE_VECS[doc.doc_id] = vec
-
-
-def _rerank_with_titles(
-    q_vec: list[float],
-    candidates: list[Doc],
-    scored_pairs: list[tuple[str, float]],
-) -> list[Doc]:
-    if not candidates or not API_KEY:
-        return candidates
-    score_map = {doc_id: score for doc_id, score in scored_pairs[:RERANK_TOP_N]}
-    title_candidates = candidates[:TITLE_RERANK_TOP_N]
-    _ensure_title_vectors(title_candidates)
-
-    fused: list[tuple[float, Doc]] = []
-    for doc in candidates:
-        content_score = score_map.get(doc.doc_id, 0.0)
-        title_vec = _TITLE_VECS.get(doc.doc_id)
-        title_score = _cosine(q_vec, title_vec) if title_vec else content_score
-        local_support = 0.0
-        for neighbor_id in _neighbor_doc_ids(doc.doc_id):
-            if neighbor_id == doc.doc_id:
-                continue
-            local_support += score_map.get(neighbor_id, 0.0)
-        fused_score = (
-            (1.0 - TITLE_SCORE_WEIGHT) * content_score
-            + TITLE_SCORE_WEIGHT * title_score
-            + LOCAL_SUPPORT_WEIGHT * local_support
-        )
-        fused.append((fused_score, doc))
-    fused.sort(key=lambda item: item[0], reverse=True)
-    return [doc for _, doc in fused]
+    return re.split(r"::[sp]\d{4}$", doc_id, maxsplit=1)[0]
 
 
 def _collect_image_ids(docs: list[Doc], query: str = "", max_ids: int = 3) -> list[str]:
@@ -592,29 +599,105 @@ def _neighbor_doc_ids(doc_id: str, radius: int = NEIGHBOR_RADIUS) -> list[str]:
     return neighbors
 
 
+def _forward_doc_ids(doc_id: str, count: int = 3) -> list[str]:
+    if "::s" not in doc_id:
+        return [doc_id]
+    prefix, section = doc_id.rsplit("::s", 1)
+    try:
+        section_idx = int(section)
+    except ValueError:
+        return [doc_id]
+    ids = []
+    for offset in range(0, count + 1):
+        candidate = f"{prefix}::s{section_idx + offset:04d}"
+        if candidate in _DOC_ID_MAP:
+            ids.append(candidate)
+    return ids
+
+
 def _select_evidence_docs(docs: list[Doc], query: str = "", max_docs: int = MAX_EVIDENCE_DOCS) -> list[Doc]:
     if not docs:
         return []
-    if _CHUNK_MODE != "small":
-        return docs[:max_docs]
 
     pool: list[Doc] = []
     seen: set[str] = set()
     for doc in docs[:max(SOURCE_DOCS_FOR_EXPANSION, max_docs)]:
-        candidate_ids = [doc.doc_id, *_neighbor_doc_ids(doc.doc_id)]
+        candidate_ids = [doc.doc_id, *_neighbor_doc_ids(doc.doc_id), *_forward_doc_ids(doc.doc_id)]
         for neighbor_id in candidate_ids:
             if neighbor_id in seen:
                 continue
             pool.append(_DOC_ID_MAP[neighbor_id])
             seen.add(neighbor_id)
     if query:
-        pool.sort(key=lambda doc: _doc_relevance(query, doc), reverse=True)
+        pool.sort(
+            key=lambda doc: (
+                _doc_relevance(query, doc),
+                0 if _is_heading_only_doc(doc) else 1,
+            ),
+            reverse=True,
+        )
     return pool[:max_docs] or docs[:max_docs]
+
+
+def _strip_doc_markup(text: str) -> str:
+    text = re.sub(r"^#+\s*", "", text.strip())
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _compress_evidence(query: str, docs: list[Doc], policy_evidence: list[str], kind: str) -> str:
+    if policy_evidence:
+        return "\n".join(policy_evidence)
+    lines: list[str] = []
+    for doc in docs[:MAX_EVIDENCE_DOCS]:
+        if _looks_like_leaked_image_list(doc):
+            continue
+        title = _strip_doc_markup(doc.title)
+        content = _strip_doc_markup(doc.content)
+        if _is_heading_only_doc(doc) and len(docs) > 1:
+            continue
+        if not content:
+            continue
+        image_hint = " <PIC>" if doc.image_refs and "<PIC>" in doc.content else ""
+        lines.append(f"[{doc.doc_id}] {title}: {content}{image_hint}")
+    if not lines:
+        lines = [_strip_doc_markup(doc.content) for doc in docs[:3] if doc.content.strip()]
+    header = f"question_type={kind}; language={_detect_language(query)}"
+    return header + "\n" + "\n".join(lines[:MAX_EVIDENCE_DOCS])
+
+
+def _build_evidence_bundle(plan: QueryPlan, image_facts: list[str]) -> EvidenceBundle:
+    if plan.policy_evidence:
+        return EvidenceBundle(docs=[], evidence=plan.policy_evidence, compressed="\n".join(plan.policy_evidence), image_ids=[])
+
+    retrieve_q = (
+        _rewrite_retrieve_query(plan.retrieval_query, image_facts)
+        if USE_QUERY_REWRITE
+        else plan.retrieval_query
+    )
+    docs = _retrieve(retrieve_q)
+    evidence_docs = _select_evidence_docs(docs, plan.retrieval_query)
+    compressed = _compress_evidence(plan.retrieval_query, evidence_docs, [], plan.kind)
+    evidence = [f"[{doc.title}] {doc.content}" for doc in evidence_docs]
+    image_ids = _collect_image_ids(evidence_docs or docs, plan.retrieval_query)
+    return EvidenceBundle(docs=evidence_docs, evidence=evidence, compressed=compressed, image_ids=image_ids)
 
 
 # ─── Session Memory ───────────────────────────────────────────────────────────
 
 _SESSIONS: dict[str, deque] = {}
+
+
+def _format_request_history(history: list[dict]) -> str:
+    turns: list[str] = []
+    for item in history[-SESSION_MAX_TURNS:]:
+        if not isinstance(item, dict):
+            continue
+        q = str(item.get("q") or item.get("question") or item.get("user") or "").strip()
+        a = str(item.get("a") or item.get("answer") or item.get("assistant") or "").strip()
+        if q or a:
+            turns.append(f"Q: {q}\nA: {a}")
+    return "\n".join(turns)
 
 
 def _get_memory(session_id: str) -> str:
@@ -673,19 +756,6 @@ def _sanitize_retrieve_query(text: str) -> str:
     cleaned = re.sub(r"[\r\n\t]+", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip(" \"'")
-
-
-def _split_retrieve_queries(text: str) -> list[str]:
-    parts = re.split(r"[;\n；|]+", text)
-    queries: list[str] = []
-    seen: set[str] = set()
-    for part in parts:
-        cleaned = _sanitize_retrieve_query(part)
-        if not cleaned or cleaned in seen:
-            continue
-        queries.append(cleaned)
-        seen.add(cleaned)
-    return queries or [_sanitize_retrieve_query(text)]
 
 
 def _rewrite_retrieve_query(query: str, image_facts: list[str]) -> str:
@@ -791,7 +861,6 @@ _ANSWER_LEAK_PATTERNS = (
     "用户问题",
     "知识库证据",
     "根据规则",
-    "规则",
     "不能编造",
     "我无法访问",
     "知识库未找到",
@@ -855,20 +924,40 @@ def _fallback_answer_from_evidence(evidence: list[str]) -> str:
     return "请提供订单号或商品信息，我们会为您进一步核实处理。"
 
 
-def _generate_answer(query: str, evidence: list[str], image_facts: list[str],
+def _policy_answer_from_evidence(evidence: list[str]) -> str:
+    if not evidence:
+        return ""
+    text = evidence[0].strip()
+    if "：" in text:
+        return text.split("：", 1)[1].strip()
+    return text
+
+
+def _generate_answer(query: str, plan: QueryPlan, bundle: EvidenceBundle, image_facts: list[str],
                      memory: str, images_b64: list[str]) -> str:
-    ev_text = "\n".join(f"- {s}" for s in evidence) if evidence else "无相关知识库内容"
+    if plan.kind == "policy" and bundle.evidence:
+        return _policy_answer_from_evidence(bundle.evidence)
+
+    ev_text = bundle.compressed or "\n".join(f"- {s}" for s in bundle.evidence) or "无相关知识库内容"
     img_text = "\n".join(f"- {f}" for f in image_facts) if image_facts else "无"
 
-    english_query = any(ord(c) < 128 and c.isalpha() for c in query[:20]) and not any('一' <= c <= '鿿' for c in query)
-    lang_hint = "Answer in English." if english_query else "用中文回答。"
+    lang_hint = "Answer in English." if plan.language == "en" else "用中文回答。"
+    style_hint = {
+        "procedure": "Extract the required operation steps. Keep it concise and complete.",
+        "visual_manual": "Use visual/manual evidence. Keep <PIC> exactly where a picture is relevant.",
+        "fact": "Extract only the requested facts, parameters, states, or meanings.",
+        "complaint": "Use a service recovery tone and give a concrete handling path.",
+        "manual": "Answer from the supplied manual evidence only.",
+    }.get(plan.kind, "Answer from the supplied evidence only.")
 
     user_text = (
         f"Question:\n{query}\n\n"
+        f"Question type:\n{plan.kind}\n\n"
         f"Conversation memory:\n{memory or 'None'}\n\n"
-        f"Evidence or policy text:\n{ev_text}\n\n"
+        f"Compressed evidence:\n{ev_text}\n\n"
         f"Image facts:\n{img_text}\n\n"
         f"Language rule: {lang_hint}\n"
+        f"Answer style: {style_hint}\n"
         "Write the final customer-facing answer only in the JSON field `answer`."
     )
 
@@ -904,47 +993,64 @@ def _generate_answer(query: str, evidence: list[str], image_facts: list[str],
     return answer
 
 
+def _write_trace(record: dict) -> None:
+    if not RAG_TRACE_PATH:
+        return
+    try:
+        path = Path(RAG_TRACE_PATH)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        return
+
+
 # ─── Main Handler ─────────────────────────────────────────────────────────────
 
-def _handle(req: ChatRequest) -> str:
+def _handle(req: ChatRequest, session_id: str | None = None) -> str:
     query = req.user_query
-    session_id = (req.session_id or f"sess_{int(time.time()*1000)}").strip()
-    memory = _get_memory(session_id)
+    session_id = (session_id or req.session_id or f"sess_{int(time.time()*1000)}").strip()
+    memory_parts = [_get_memory(session_id), _format_request_history(req.history)]
+    memory = "\n".join(part for part in memory_parts if part)
 
     # 1. VLM image analysis
     image_facts = _analyze_images(req.images) if req.images else []
 
-    # 2. Retrieval / policy evidence
-    policy_evidence = _match_policy_evidence(query)
-    if policy_evidence:
-        docs: list[Doc] = []
-        evidence_docs: list[Doc] = []
-        evidence = policy_evidence
-        image_ids: list[str] = []
-    else:
-        retrieve_q = _rewrite_retrieve_query(query, image_facts)
-        docs = _retrieve(retrieve_q)
-        evidence_docs = _select_evidence_docs(docs, query)
-        evidence = [f"[{doc.title}] {doc.content}" for doc in evidence_docs]
-        image_ids = _collect_image_ids(evidence_docs or docs, query)
+    # 2. Plan + retrieval / policy evidence
+    plan = _classify_query(query, image_facts)
+    bundle = _build_evidence_bundle(plan, image_facts)
 
     # 3. LLM generation
-    if not API_KEY:
+    if plan.kind == "policy" and bundle.evidence:
+        answer = _policy_answer_from_evidence(bundle.evidence)
+    elif not API_KEY:
         answer = "您好，服务暂时不可用，请稍后重试。"
     else:
         try:
-            answer = _generate_answer(query, evidence, image_facts, memory, req.images)
+            answer = _generate_answer(query, plan, bundle, image_facts, memory, req.images)
             if not answer or _looks_like_answer_leak(answer):
-                answer = _fallback_answer_from_evidence(evidence)
+                answer = _fallback_answer_from_evidence(bundle.evidence)
         except Exception as _e:
             import traceback; traceback.print_exc()
-            answer = _fallback_answer_from_evidence(evidence)
+            answer = _fallback_answer_from_evidence(bundle.evidence)
 
     # 4. Attach image IDs only when answer already contains <PIC>
-    if image_ids and "<PIC>" in answer:
-        answer = f"{answer} {json.dumps(image_ids, ensure_ascii=False)}"
+    if bundle.image_ids and "<PIC>" in answer:
+        answer = f"{answer} {json.dumps(bundle.image_ids, ensure_ascii=False)}"
 
     _save_memory(session_id, query, answer)
+    _write_trace({
+        "ts": int(time.time()),
+        "session_id": session_id,
+        "query": query,
+        "kind": plan.kind,
+        "language": plan.language,
+        "needs_image": plan.needs_image,
+        "doc_ids": [doc.doc_id for doc in bundle.docs],
+        "image_ids": bundle.image_ids,
+        "compressed_evidence": bundle.compressed,
+        "answer": answer,
+    })
     return answer
 
 
@@ -953,24 +1059,15 @@ def _handle(req: ChatRequest) -> str:
 app = FastAPI(title="DF1165 Multimodal CS Agent", version="4.0.0")
 
 
-@app.on_event("startup")
-def _startup() -> None:
-    if USE_VECTOR_RETRIEVAL:
-        _load_embeddings()
-
-
 @app.get("/health")
 def health() -> dict:
     return {
         "ok": True,
         "provider": PROVIDER,
         "knowledge_docs": len(KNOWLEDGE),
-        "embed_vecs": len(_EMBED_VECS),
-        "use_vector_retrieval": USE_VECTOR_RETRIEVAL,
-        "supports_embeddings": SUPPORTS_EMBEDDINGS,
+        "retrieval_mode": "lexical-bm25",
         "chat_model": CHAT_MODEL,
         "vlm_model": VLM_MODEL,
-        "embed_model": EMBED_MODEL,
         "has_api_key": bool(API_KEY),
     }
 
@@ -988,8 +1085,8 @@ def chat(
         if authorization.split(" ", 1)[1].strip() != KAFU_API_TOKEN:
             raise HTTPException(status_code=403, detail="invalid bearer token")
 
-    answer = _handle(req)
     session_id = (req.session_id or "").strip() or f"sess_{int(time.time()*1000)}"
+    answer = _handle(req, session_id)
 
     return ChatResponse(data={
         "answer": answer,

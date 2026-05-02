@@ -38,6 +38,11 @@ BAD_ANSWER_MARKERS = (
     "根据规则",
     "处理您的问题时遇到错误",
     "系统暂时不可用",
+    "available documentation",
+    "provided evidence",
+    "please refer",
+    "manual does not contain",
+    "current knowledge base",
     "I don't have specific",
     "please refer to the user manual",
 )
@@ -91,7 +96,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--knowledge-file",
         type=Path,
-        default=Path("data/knowledge.jsonl"),
+        default=Path("data/knowledge_v2.jsonl"),
         help="Path to knowledge jsonl with image_refs",
     )
     parser.add_argument(
