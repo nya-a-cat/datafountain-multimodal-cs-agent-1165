@@ -7,4 +7,5 @@ outputs/
 AGENTS.md
 dataset.md
 *.md
+!/README.md
 deprecated/
